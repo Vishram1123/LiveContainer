@@ -3,6 +3,7 @@
 #include <dlfcn.h>
 #include <objc/runtime.h>
 #import "../LiveContainer/utils.h"
+#import "DebPathRedirect.h"
 
 static NSString *loadTweakAtURL(NSURL *url) {
     NSString *tweakPath = url.path;
@@ -98,6 +99,12 @@ static void TweakLoaderConstructor() {
         // nothing to load
         return;
     }
+
+    // Rewrite the absolute paths deb-imported tweaks use to find their own bundles/frameworks
+    // (e.g. /Library/Application Support/Foo.bundle) to wherever DebImporter actually put them,
+    // before any tweak dylib is dlopen'd and can go looking for them.
+    NSString *selectedTweakFolderPath = tweakFolderName.length > 0 ? [globalTweakFolder stringByAppendingPathComponent:tweakFolderName] : nil;
+    DebPathRedirectInit(globalTweakFolder, selectedTweakFolderPath);
 
     // Load CydiaSubstrate
     const char *lcMainBundlePath;

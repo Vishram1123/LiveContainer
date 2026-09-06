@@ -30,12 +30,11 @@ struct DebImportResult {
 }
 
 enum DebImporter {
-    // Rootless tweaks put their payload under these paths (with or without a
-    // leading /var/jb prefix, depending on how the .deb was built); we match on
-    // the trailing path components only so both conventions resolve the same way.
+    // Rootless tweaks put their dylib under this path (with or without a leading /var/jb
+    // prefix, depending on how the .deb was built); we match on the trailing path components
+    // only so both conventions resolve the same way. Resource bundles/frameworks aren't
+    // pinned to one directory convention -- see installPayload below.
     private static let dynamicLibrariesSuffix = ["Library", "MobileSubstrate", "DynamicLibraries"]
-    private static let frameworksSuffix = ["Library", "Frameworks"]
-    private static let preferenceBundlesSuffix = ["Library", "PreferenceBundles"]
 
     private static let supportedScriptCommands: Set<String> = ["mv", "cp", "mkdir", "ln"]
 
@@ -192,10 +191,12 @@ enum DebImporter {
     private static func installPayload(from dataRoot: URL, into destination: URL) -> [String] {
         let fm = FileManager.default
         var installed: [String] = []
+        // absolute path (as the tweak's own compiled-in strings would reference it) -> where
+        // we actually put it, so the native path-redirect hook in TweakLoader can resolve it
+        var redirects: [String: String] = [:]
 
         var dynamicLibDirs: [URL] = []
-        var frameworksDirs: [URL] = []
-        var preferenceBundleDirs: [URL] = []
+        var resourceDirs: [URL] = []
 
         if let enumerator = fm.enumerator(at: dataRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
             for case let url as URL in enumerator {
@@ -203,15 +204,36 @@ enum DebImporter {
                 guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { continue }
                 if pathEndsWith(url, dynamicLibrariesSuffix) {
                     dynamicLibDirs.append(url)
-                } else if pathEndsWith(url, frameworksSuffix) {
-                    frameworksDirs.append(url)
-                } else if pathEndsWith(url, preferenceBundlesSuffix) {
-                    preferenceBundleDirs.append(url)
+                    continue
+                }
+                // Tweaks stash their resource bundles/frameworks all over the place --
+                // Library/PreferenceBundles, Library/Frameworks, Library/Application Support,
+                // vendor-specific folders, etc. Rather than enumerate every convention, grab
+                // any *.framework/*.bundle directory wherever it lives, and don't descend into
+                // it any further (its contents are copied as one unit).
+                let ext = url.pathExtension.lowercased()
+                if ext == "framework" || ext == "bundle" {
+                    resourceDirs.append(url)
+                    enumerator.skipDescendants()
                 }
             }
         }
 
-        func install(_ itemUrl: URL, patchMachO: Bool) {
+        // maps the absolute path form the tweak's own binary might reference (with or without
+        // the rootless /var/jb prefix) to where we're about to install this item.
+        func recordRedirect(for itemUrl: URL, installedAt dest: URL) {
+            var relativeComponents = Array(itemUrl.pathComponents.dropFirst(dataRoot.pathComponents.count))
+            if relativeComponents.count >= 2, relativeComponents[0] == "var", relativeComponents[1] == "jb" {
+                relativeComponents.removeFirst(2)
+            }
+            guard !relativeComponents.isEmpty else { return }
+            let barePath = "/" + relativeComponents.joined(separator: "/")
+            let rootlessPath = "/var/jb" + barePath
+            redirects[barePath] = dest.path
+            redirects[rootlessPath] = dest.path
+        }
+
+        func install(_ itemUrl: URL, patchMachO: Bool, recordAsRedirect: Bool) {
             let dest = destination.appendingPathComponent(itemUrl.lastPathComponent)
             if fm.fileExists(atPath: dest.path) {
                 try? fm.removeItem(at: dest)
@@ -225,6 +247,9 @@ enum DebImporter {
             if patchMachO {
                 patchRPath(at: dest)
             }
+            if recordAsRedirect {
+                recordRedirect(for: itemUrl, installedAt: dest)
+            }
             installed.append(itemUrl.lastPathComponent)
         }
 
@@ -233,23 +258,26 @@ enum DebImporter {
             for child in children {
                 let ext = child.pathExtension.lowercased()
                 guard ext == "dylib" || ext == "plist" else { continue }
-                install(child, patchMachO: ext == "dylib")
+                install(child, patchMachO: ext == "dylib", recordAsRedirect: false)
             }
         }
-        for dir in frameworksDirs {
-            let children = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
-            for child in children where child.pathExtension.lowercased() == "framework" {
-                install(child, patchMachO: true)
-            }
-        }
-        for dir in preferenceBundleDirs {
-            let children = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
-            for child in children where child.pathExtension.lowercased() == "bundle" {
-                install(child, patchMachO: false)
-            }
+        for resourceDir in resourceDirs {
+            let ext = resourceDir.pathExtension.lowercased()
+            install(resourceDir, patchMachO: ext == "framework", recordAsRedirect: true)
         }
 
+        recordRedirects(redirects, in: destination)
         return installed
+    }
+
+    private static func recordRedirects(_ redirects: [String: String], in destination: URL) {
+        guard !redirects.isEmpty else { return }
+        let plistUrl = destination.appendingPathComponent(".lc_deb_redirects.plist")
+        var merged = (NSDictionary(contentsOf: plistUrl) as? [String: String]) ?? [:]
+        for (from, to) in redirects {
+            merged[from] = to
+        }
+        (merged as NSDictionary).write(to: plistUrl, atomically: true)
     }
 
     // Same rpath fixup manual dylib/framework import already applies before signing.
