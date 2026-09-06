@@ -38,33 +38,40 @@ struct LCTweakFolderView : View {
     @StateObject private var renameFileInput = InputHelper()
     
     @State private var choosingTweak = false
-    
+
     @State private var isTweakSigning = false
-    
+
+    @State private var debWarningShow = false
+    @State private var debWarningInfo = ""
+
     init(baseUrl: URL, isRoot: Bool = false) {
         _baseUrl = State(initialValue: baseUrl)
         self.isRoot = isRoot
-        var tmpTweakItems : [LCTweakItem] = []
-        let fm = FileManager()
         do {
-            let files = try fm.contentsOfDirectory(atPath: baseUrl.path)
-            for fileName in files {
-                let fileUrl = baseUrl.appendingPathComponent(fileName)
-                var isFolder : ObjCBool = false
-                fm.fileExists(atPath: fileUrl.path, isDirectory: &isFolder)
-                let isEnabled = !fileName.hasSuffix(LCTweakItem.disabledSuffix)
-                let baseName = isEnabled ? fileName : String(fileName.dropLast(LCTweakItem.disabledSuffix.count))
-                let isFramework = isFolder.boolValue && baseName.hasSuffix(".framework")
-                let isTweak = !isFolder.boolValue && baseName.hasSuffix(".dylib")
-                tmpTweakItems.append(LCTweakItem(fileUrl: fileUrl, isFolder: isFolder.boolValue, isFramework: isFramework, isTweak: isTweak, isEnabled: isEnabled))
-            }
-            _tweakItems = State(initialValue: tmpTweakItems)
+            _tweakItems = State(initialValue: try LCTweakFolderView.scanTweakItems(at: baseUrl))
         } catch {
             NSLog("[LC] failed to load tweaks \(error.localizedDescription)")
             _errorShow = State(initialValue: true)
             _errorInfo = State(initialValue: error.localizedDescription)
             _tweakItems = State(initialValue: [])
         }
+    }
+
+    static func scanTweakItems(at baseUrl: URL) throws -> [LCTweakItem] {
+        var tmpTweakItems : [LCTweakItem] = []
+        let fm = FileManager()
+        let files = try fm.contentsOfDirectory(atPath: baseUrl.path)
+        for fileName in files {
+            let fileUrl = baseUrl.appendingPathComponent(fileName)
+            var isFolder : ObjCBool = false
+            fm.fileExists(atPath: fileUrl.path, isDirectory: &isFolder)
+            let isEnabled = !fileName.hasSuffix(LCTweakItem.disabledSuffix)
+            let baseName = isEnabled ? fileName : String(fileName.dropLast(LCTweakItem.disabledSuffix.count))
+            let isFramework = isFolder.boolValue && baseName.hasSuffix(".framework")
+            let isTweak = !isFolder.boolValue && baseName.hasSuffix(".dylib")
+            tmpTweakItems.append(LCTweakItem(fileUrl: fileUrl, isFolder: isFolder.boolValue, isFramework: isFramework, isTweak: isTweak, isEnabled: isEnabled))
+        }
+        return tmpTweakItems
     }
 
     var body: some View {
@@ -187,6 +194,12 @@ struct LCTweakFolderView : View {
         } message: {
             Text(errorInfo)
         }
+        .alert("lc.tweakView.debUnsupportedScriptTitle".loc, isPresented: $debWarningShow) {
+            Button("lc.common.ok".loc, action: {
+            })
+        } message: {
+            Text(debWarningInfo)
+        }
         .textFieldAlert(
             isPresented: $newFolderInput.show,
             title: "lc.common.enterNewFolderName".loc,
@@ -211,7 +224,7 @@ struct LCTweakFolderView : View {
                 renameFileInput.close(result: "")
             }
         )
-        .betterFileImporter(isPresented: $choosingTweak, types: [.dylib, .lcFramework, /*.deb*/], multiple: true, callback: { fileUrls in
+        .betterFileImporter(isPresented: $choosingTweak, types: [.dylib, .lcFramework, .deb], multiple: true, callback: { fileUrls in
             Task { await startInstallTweak(fileUrls) }
         }, onDismiss: {
             choosingTweak = false
@@ -364,15 +377,29 @@ struct LCTweakFolderView : View {
     }
     
     func startInstallTweak(_ urls: [URL]) async {
+        var debWarnings: [String] = []
+        var didImportDeb = false
         do {
             let fm = FileManager()
             // we will sign later before app launch
-            
+
             for fileUrl in urls {
-                // handle deb file
                 if(!fileUrl.isFileURL) {
                     throw "lc.tweakView.notFileError %@".localizeWithFormat(fileUrl.lastPathComponent)
                 }
+
+                if fileUrl.pathExtension.lowercased() == "deb" {
+                    do {
+                        let result = try DebImporter.importDeb(at: fileUrl, into: self.baseUrl)
+                        debWarnings.append(contentsOf: result.unsupportedScriptLines)
+                        didImportDeb = true
+                    } catch {
+                        throw "lc.tweakView.debImportError %@".localizeWithFormat(fileUrl.lastPathComponent)
+                    }
+                    try? fm.removeItem(at: fileUrl)
+                    continue
+                }
+
                 let toPath = self.baseUrl.appendingPathComponent(fileUrl.lastPathComponent)
                 try fm.moveItem(at: fileUrl, to: toPath)
                 LCParseMachO((toPath.path as NSString).utf8String, false) { path, header, _, _ in
@@ -383,10 +410,21 @@ struct LCTweakFolderView : View {
                 let isTweak = toPath.lastPathComponent.hasSuffix(".dylib")
                 self.tweakItems.append(LCTweakItem(fileUrl: toPath, isFolder: false, isFramework: isFramework, isTweak: isTweak, isEnabled: true))
             }
+
+            // a .deb can drop multiple items (dylib + plist, a framework, a bundle),
+            // so re-scan the folder from disk rather than tracking them one by one
+            if didImportDeb {
+                tweakItems = try LCTweakFolderView.scanTweakItems(at: baseUrl)
+            }
         } catch {
             errorInfo = error.localizedDescription
-            errorShow = true            
+            errorShow = true
             return
+        }
+
+        if !debWarnings.isEmpty {
+            debWarningInfo = "lc.tweakView.debUnsupportedScriptMsg %@".localizeWithFormat(debWarnings.joined(separator: "\n"))
+            debWarningShow = true
         }
     }
 }

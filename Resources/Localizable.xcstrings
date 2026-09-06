@@ -32004,6 +32004,39 @@
         }
       }
     },
+    "lc.tweakView.debImportError %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Failed to import %@: not a valid .deb package."
+          }
+        }
+      }
+    },
+    "lc.tweakView.debUnsupportedScriptTitle" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Unsupported Setup Steps"
+          }
+        }
+      }
+    },
+    "lc.tweakView.debUnsupportedScriptMsg %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This tweak's install script contains steps LiveContainer doesn't support, so they were skipped:\n%@"
+          }
+        }
+      }
+    },
     "lc.utils.initSigningError" : {
       "extractionState" : "manual",
       "localizations" : {
