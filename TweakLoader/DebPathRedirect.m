@@ -1,43 +1,8 @@
 #import "DebPathRedirect.h"
 #import "../LiveContainer/utils.h"
 #include <limits.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-// NSLog/os_log redact string arguments (both %@ and %s) as <private> by default, and no
-// syslog client available for testing could decode the {public} privacy override cleanly
-// either. Buffer every diagnostic line in memory instead, and dump it via a deliberate
-// uncaught exception a few seconds after the hooks install -- LCBootstrap.m already installs
-// NSSetUncaughtExceptionHandler and stores the exception's reason+backtrace in UserDefaults
-// under "error", which LCTabView.swift shows as a copyable crash-report sheet next time
-// LiveContainer's own UI (not the guest app) is opened. That path isn't subject to the
-// unified log's privacy redaction at all since it's just a plist value, not an os_log call.
-static NSMutableArray<NSString *> *sDiagnosticLines;
-static NSObject *sDiagnosticLock;
-static NSUInteger sDiagnosticGeneration;
-
-// Debounced: each new log line pushes the dump back another 6 seconds, so it fires 6 seconds
-// after diagnostic activity actually quiets down rather than at some arbitrary fixed point the
-// tester might not have finished navigating to by then.
-static void scheduleDiagnosticsDump(void) {
-    NSUInteger myGeneration = ++sDiagnosticGeneration;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (myGeneration != sDiagnosticGeneration) return; // superseded by more recent activity
-        NSString *dump = [sDiagnosticLines componentsJoinedByString:@"\n"];
-        [NSException raise:@"LCDebPathRedirectDiagnostics" format:@"%@", dump];
-    });
-}
-
-static void lclog(NSString *msg) {
-    if (!sDiagnosticLock) sDiagnosticLock = [NSObject new];
-    @synchronized (sDiagnosticLock) {
-        if (!sDiagnosticLines) sDiagnosticLines = [NSMutableArray new];
-        [sDiagnosticLines addObject:msg];
-    }
-    NSLog(@"%@", msg);
-    scheduleDiagnosticsDump();
-}
 
 // Redirect table: each entry maps an absolute path prefix a deb-imported tweak's
 // compiled-in strings might reference (e.g. "/Library/Application Support/Foo.bundle"
@@ -58,7 +23,6 @@ static NSUInteger sIdentifierRedirectCount = 0;
 
 static void loadRedirectsFromPlist(NSString *plistPath, NSMutableDictionary<NSString *, NSString *> *merged) {
     NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:plistPath];
-    lclog([NSString stringWithFormat:@"[LC] DebPathRedirect: reading %@ -> %@ entries", plistPath, dict ? @(dict.count) : @"none/unreadable"]);
     if (![dict isKindOfClass:NSDictionary.class]) return;
     for (NSString *from in dict) {
         id to = dict[from];
@@ -77,7 +41,6 @@ static const char *rewritePath(const char *path) {
             (path[r->fromLen] == '\0' || path[r->fromLen] == '/')) {
             static __thread char buffer[PATH_MAX];
             snprintf(buffer, sizeof(buffer), "%s%s", r->to, path + r->fromLen);
-            lclog([NSString stringWithFormat:@"[LC] DebPathRedirect: %s -> %s", path, buffer]);
             return buffer;
         }
     }
@@ -124,32 +87,26 @@ static NSURL *lc_debRewriteFileURL(NSURL *url) {
 @implementation NSBundle (LCDebRedirect)
 
 + (instancetype)lc_debRedirect_bundleWithPath:(NSString *)path {
-    lclog([NSString stringWithFormat:@"[LC] DebPathRedirect: +[NSBundle bundleWithPath:%@]", path]);
     return [self lc_debRedirect_bundleWithPath:lc_debRewritePath(path)];
 }
 
 - (instancetype)lc_debRedirect_initWithPath:(NSString *)path {
-    lclog([NSString stringWithFormat:@"[LC] DebPathRedirect: -[NSBundle initWithPath:%@]", path]);
     return [self lc_debRedirect_initWithPath:lc_debRewritePath(path)];
 }
 
 + (instancetype)lc_debRedirect_bundleWithURL:(NSURL *)url {
-    lclog([NSString stringWithFormat:@"[LC] DebPathRedirect: +[NSBundle bundleWithURL:%@]", url]);
     return [self lc_debRedirect_bundleWithURL:lc_debRewriteFileURL(url)];
 }
 
 - (instancetype)lc_debRedirect_initWithURL:(NSURL *)url {
-    lclog([NSString stringWithFormat:@"[LC] DebPathRedirect: -[NSBundle initWithURL:%@]", url]);
     return [self lc_debRedirect_initWithURL:lc_debRewriteFileURL(url)];
 }
 
 + (instancetype)lc_debRedirect_bundleWithIdentifier:(NSString *)identifier {
     NSBundle *result = [self lc_debRedirect_bundleWithIdentifier:identifier];
-    lclog([NSString stringWithFormat:@"[LC] DebPathRedirect: +[NSBundle bundleWithIdentifier:%@] -> %@", identifier, result]);
     if (result) return result;
     const char *path = lookupIdentifierRedirect(identifier.UTF8String);
     if (path) {
-        lclog([NSString stringWithFormat:@"[LC] DebPathRedirect: bundleWithIdentifier fallback %@ -> %s", identifier, path]);
         return [NSBundle bundleWithPath:[NSString stringWithUTF8String:path]];
     }
     return result;
@@ -163,17 +120,11 @@ static NSURL *lc_debRewriteFileURL(NSURL *url) {
 @implementation NSFileManager (LCDebRedirect)
 
 - (BOOL)lc_debRedirect_fileExistsAtPath:(NSString *)path {
-    NSString *rewritten = lc_debRewritePath(path);
-    BOOL result = [self lc_debRedirect_fileExistsAtPath:rewritten];
-    lclog([NSString stringWithFormat:@"[LC] DebPathRedirect: -[NSFileManager fileExistsAtPath:%@] (rewritten=%@) -> %d", path, rewritten, result]);
-    return result;
+    return [self lc_debRedirect_fileExistsAtPath:lc_debRewritePath(path)];
 }
 
 - (BOOL)lc_debRedirect_fileExistsAtPath:(NSString *)path isDirectory:(BOOL *)isDirectory {
-    NSString *rewritten = lc_debRewritePath(path);
-    BOOL result = [self lc_debRedirect_fileExistsAtPath:rewritten isDirectory:isDirectory];
-    lclog([NSString stringWithFormat:@"[LC] DebPathRedirect: -[NSFileManager fileExistsAtPath:%@ isDirectory:] (rewritten=%@) -> %d", path, rewritten, result]);
-    return result;
+    return [self lc_debRedirect_fileExistsAtPath:lc_debRewritePath(path) isDirectory:isDirectory];
 }
 
 - (NSArray<NSString *> *)lc_debRedirect_contentsOfDirectoryAtPath:(NSString *)path error:(NSError **)error {
@@ -183,12 +134,6 @@ static NSURL *lc_debRewriteFileURL(NSURL *url) {
 @end
 
 void DebPathRedirectInit(NSString *globalTweakFolder, NSString *selectedTweakFolderPath) {
-    // TEMPORARY DIAGNOSTIC ONLY -- remove before merging. Scheduled unconditionally, up front,
-    // so we get a crash-report dump (see LCBootstrap.m's exceptionHandler / LCTabView's
-    // crashReportShow) of everything logged below no matter which path this function takes.
-    scheduleDiagnosticsDump();
-
-    lclog([NSString stringWithFormat:@"[LC] DebPathRedirect: init globalTweakFolder=%@ selectedTweakFolderPath=%@", globalTweakFolder, selectedTweakFolderPath]);
     NSMutableDictionary<NSString *, NSString *> *merged = [NSMutableDictionary new];
     if (globalTweakFolder) {
         loadRedirectsFromPlist([globalTweakFolder stringByAppendingPathComponent:@".lc_deb_redirects.plist"], merged);
@@ -196,7 +141,6 @@ void DebPathRedirectInit(NSString *globalTweakFolder, NSString *selectedTweakFol
     if (selectedTweakFolderPath) {
         loadRedirectsFromPlist([selectedTweakFolderPath stringByAppendingPathComponent:@".lc_deb_redirects.plist"], merged);
     }
-    lclog([NSString stringWithFormat:@"[LC] DebPathRedirect: merged %lu entries: %@", (unsigned long)merged.count, merged]);
     if (merged.count == 0) return;
 
     NSMutableArray<NSString *> *pathKeys = [NSMutableArray new];
@@ -240,5 +184,4 @@ void DebPathRedirectInit(NSString *globalTweakFolder, NSString *selectedTweakFol
     swizzle(NSFileManager.class, @selector(fileExistsAtPath:), @selector(lc_debRedirect_fileExistsAtPath:));
     swizzle(NSFileManager.class, @selector(fileExistsAtPath:isDirectory:), @selector(lc_debRedirect_fileExistsAtPath:isDirectory:));
     swizzle(NSFileManager.class, @selector(contentsOfDirectoryAtPath:error:), @selector(lc_debRedirect_contentsOfDirectoryAtPath:error:));
-    lclog([NSString stringWithFormat:@"[LC] DebPathRedirect: installed hooks (%lu path, %lu identifier redirects)", (unsigned long)sRedirectCount, (unsigned long)sIdentifierRedirectCount]);
 }

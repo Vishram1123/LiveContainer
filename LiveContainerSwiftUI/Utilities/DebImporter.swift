@@ -232,7 +232,15 @@ enum DebImporter {
         // we actually put it, so the native path-redirect hook in TweakLoader can resolve it
         var redirects: [String: String] = [:]
         func recordRedirect(for url: URL) {
-            let relativeComponents = Array(url.pathComponents.dropFirst(tweakDir.pathComponents.count))
+            // Locate our own tweakDir folder name in the path and take everything after it,
+            // rather than dropping tweakDir.pathComponents.count -- FileManager's enumerator
+            // resolves URLs to their canonical form (e.g. adding a /private prefix), which
+            // wouldn't match tweakDir's own component count if tweakDir was built from a
+            // non-canonical URL (this bit us: it silently left a stray "/tweakName" prefix
+            // baked into every redirect key, so nothing ever matched).
+            let components = url.pathComponents
+            guard let tweakNameIndex = components.lastIndex(of: tweakName) else { return }
+            let relativeComponents = Array(components.dropFirst(tweakNameIndex + 1))
             guard !relativeComponents.isEmpty else { return }
             let barePath = "/" + relativeComponents.joined(separator: "/")
             redirects[barePath] = url.path
