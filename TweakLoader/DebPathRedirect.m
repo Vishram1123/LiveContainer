@@ -6,12 +6,12 @@
 #include <string.h>
 
 // NSLog/os_log redact %@ arguments as <private> by default, and the {public} privacy
-// annotation isn't reliably decoded by every syslog client -- write diagnostics straight
-// to stderr instead, which the system captures into the unified log verbatim, unredacted,
-// with no format-string decoding involved.
+// annotation to opt back in isn't reliably decoded by every syslog client. Side-step both
+// by doing our own string formatting first and handing NSLog the finished message through
+// a single plain %s -- no object argument left for the logging system to redact or for a
+// client to mis-decode.
 static void lclog(NSString *msg) {
-    fprintf(stderr, "%s\n", msg.UTF8String);
-    fflush(stderr);
+    NSLog(@"%s", msg.UTF8String);
 }
 
 // Redirect table: each entry maps an absolute path prefix a deb-imported tweak's
@@ -52,8 +52,7 @@ static const char *rewritePath(const char *path) {
             (path[r->fromLen] == '\0' || path[r->fromLen] == '/')) {
             static __thread char buffer[PATH_MAX];
             snprintf(buffer, sizeof(buffer), "%s%s", r->to, path + r->fromLen);
-            fprintf(stderr, "[LC] DebPathRedirect: %s -> %s\n", path, buffer);
-            fflush(stderr);
+            NSLog(@"[LC] DebPathRedirect: %s -> %s", path, buffer);
             return buffer;
         }
     }
