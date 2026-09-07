@@ -136,11 +136,20 @@ static void TweakLoaderConstructor() {
         }
         NSNumber *isDirectory = nil;
         [fileURL getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:nil];
-        // a deb-imported tweak lands in its own plain subfolder (mirroring its original
-        // layout) rather than as a loose .dylib/.framework, so recurse into it the same
-        // way the selected per-app tweak folder already does below.
         if (isDirectory.boolValue && ![name hasSuffix:@".framework"]) {
-            loadTweaksRecursively(fileURL, errors);
+            // A plain folder sitting directly in the global tweaks root is either a
+            // deb-imported tweak's own folder (mirroring its original directory layout,
+            // marked with ".lc_deb_tweak" by DebImporter.swift) or a folder the user
+            // created themselves to group/select tweaks per-app (which may itself
+            // contain nested deb-imported tweaks). Only the former should behave like a
+            // loose .dylib here and load for every app; the latter is loaded, scoped
+            // correctly, by "Load selected tweak folder" below, only for an app that
+            // actually selected it -- loading it here too would inject it into every
+            // app regardless of selection, which is the whole point of that mechanism.
+            NSString *markerPath = [fileURL URLByAppendingPathComponent:@".lc_deb_tweak"].path;
+            if ([NSFileManager.defaultManager fileExistsAtPath:markerPath]) {
+                loadTweaksRecursively(fileURL, errors);
+            }
         } else {
             NSString *error = loadTweakAtURL(fileURL);
             if (error) {

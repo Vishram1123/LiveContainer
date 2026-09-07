@@ -107,6 +107,15 @@ static void insertRPathCommand(const char *path, struct mach_header_64 *header) 
 void LCPatchAddRPath(const char *path, struct mach_header_64 *header) {
     insertRPathCommand("@executable_path/../../Tweaks", header);
     insertRPathCommand("@loader_path", header);
+    // Lets a tweak's "@rpath/Foo.framework/Foo" find Foo.framework even when it was
+    // installed by a *different* deb-imported tweak (each deb-imported tweak's own
+    // resources live nested under its own subfolder, e.g. Tweaks/OtherTweak/Library/
+    // Frameworks/Foo.framework, which the plain "Tweaks" rpath above can't see into).
+    // DebImporter.swift maintains Tweaks/.lc_shared_jbroot as a flat mirror -- symlinks
+    // keyed by each resource's original absolute path -- of every framework/dylib across
+    // every currently-imported tweak, rebuilt each time any tweak is (re)imported. See
+    // DebImporter.swift's rebuildSharedJbroot for the corresponding write side.
+    insertRPathCommand("@executable_path/../../Tweaks/.lc_shared_jbroot", header);
 }
 
 int LCPatchExecSlice(const char *path, struct mach_header_64 *header, bool doInject) {

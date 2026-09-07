@@ -15,6 +15,13 @@ struct LCTweakItem : Hashable {
     let isFramework: Bool
     let isTweak: Bool
     let isEnabled: Bool
+    // Marked by DebImporter (.lc_deb_tweak) so this folder -- which mirrors a single
+    // imported .deb's own directory structure -- is visually distinct from a plain
+    // folder the user created themselves to group/select tweaks per-app, and so
+    // TweakLoader.m's "global tweaks" loop knows a top-level one of these should load
+    // for every app the same way a loose .dylib does, while a plain user-created
+    // folder should only load for an app that has explicitly selected it.
+    let isDebImportedTweak: Bool
 
     var displayName: String {
         let name = fileUrl.lastPathComponent
@@ -69,7 +76,9 @@ struct LCTweakFolderView : View {
             let baseName = isEnabled ? fileName : String(fileName.dropLast(LCTweakItem.disabledSuffix.count))
             let isFramework = isFolder.boolValue && baseName.hasSuffix(".framework")
             let isTweak = !isFolder.boolValue && baseName.hasSuffix(".dylib")
-            tmpTweakItems.append(LCTweakItem(fileUrl: fileUrl, isFolder: isFolder.boolValue, isFramework: isFramework, isTweak: isTweak, isEnabled: isEnabled))
+            let isDebImportedTweak = isFolder.boolValue && !isFramework &&
+                fm.fileExists(atPath: fileUrl.appendingPathComponent(DebImporter.debTweakMarkerName).path)
+            tmpTweakItems.append(LCTweakItem(fileUrl: fileUrl, isFolder: isFolder.boolValue, isFramework: isFramework, isTweak: isTweak, isEnabled: isEnabled, isDebImportedTweak: isDebImportedTweak))
         }
         return tmpTweakItems
     }
@@ -90,7 +99,7 @@ struct LCTweakFolderView : View {
                                     }
                                     .opacity(0)
                                     HStack {
-                                        Label(tweakItem.displayName, systemImage: "folder.fill")
+                                        Label(tweakItem.displayName, systemImage: tweakItem.isDebImportedTweak ? "shippingbox.fill" : "folder.fill")
                                         Spacer()
                                         Image(systemName: "chevron.forward")
                                             .font(.footnote.weight(.semibold))
@@ -249,7 +258,7 @@ struct LCTweakFolderView : View {
         guard let index = tweakItems.firstIndex(of: tweakItem) else {
             return
         }
-        tweakItems[index] = LCTweakItem(fileUrl: newUrl, isFolder: tweakItem.isFolder, isFramework: tweakItem.isFramework, isTweak: tweakItem.isTweak, isEnabled: enabled)
+        tweakItems[index] = LCTweakItem(fileUrl: newUrl, isFolder: tweakItem.isFolder, isFramework: tweakItem.isFramework, isTweak: tweakItem.isTweak, isEnabled: enabled, isDebImportedTweak: tweakItem.isDebImportedTweak)
     }
 
     func deleteTweakItem(indexSet: IndexSet) {
@@ -326,7 +335,7 @@ struct LCTweakFolderView : View {
             return
         }
         tweakItems.remove(at: indexToRename)
-        let newTweakItem = LCTweakItem(fileUrl: newUrl, isFolder: tweakItem.isFolder, isFramework: tweakItem.isFramework, isTweak: tweakItem.isTweak, isEnabled: tweakItem.isEnabled)
+        let newTweakItem = LCTweakItem(fileUrl: newUrl, isFolder: tweakItem.isFolder, isFramework: tweakItem.isFramework, isTweak: tweakItem.isTweak, isEnabled: tweakItem.isEnabled, isDebImportedTweak: tweakItem.isDebImportedTweak)
         tweakItems.insert(newTweakItem, at: indexToRename)
 
         if isRoot {
@@ -370,7 +379,7 @@ struct LCTweakFolderView : View {
             errorInfo = error.localizedDescription
             return
         }
-        tweakItems.append(LCTweakItem(fileUrl: dest, isFolder: true, isFramework: false, isTweak: false, isEnabled: true))
+        tweakItems.append(LCTweakItem(fileUrl: dest, isFolder: true, isFramework: false, isTweak: false, isEnabled: true, isDebImportedTweak: false))
         if isRoot {
             sharedModel.tweakFolderNames.append(newName)
         }
@@ -408,7 +417,7 @@ struct LCTweakFolderView : View {
 
                 let isFramework = toPath.lastPathComponent.hasSuffix(".framework")
                 let isTweak = toPath.lastPathComponent.hasSuffix(".dylib")
-                self.tweakItems.append(LCTweakItem(fileUrl: toPath, isFolder: false, isFramework: isFramework, isTweak: isTweak, isEnabled: true))
+                self.tweakItems.append(LCTweakItem(fileUrl: toPath, isFolder: false, isFramework: isFramework, isTweak: isTweak, isEnabled: true, isDebImportedTweak: false))
             }
 
             // a .deb can drop multiple items (dylib + plist, a framework, a bundle),

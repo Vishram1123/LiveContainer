@@ -30,6 +30,15 @@ struct DebImportResult {
 }
 
 enum DebImporter {
+    // Marks a deb-imported tweak's own folder so it can be told apart from a folder the
+    // user created themselves to group/select tweaks per-app: LCTweaksView.swift shows a
+    // different icon for it, and TweakLoader.m's global-tweaks loop uses its presence to
+    // decide a top-level folder should load for every app (like a loose .dylib does)
+    // rather than only for an app that has explicitly selected it. TweakLoader.m can't
+    // reference this constant directly (it's a separate dylib target), so its copy of the
+    // literal name must be kept in sync with this one.
+    static let debTweakMarkerName = ".lc_deb_tweak"
+
     private static let supportedScriptCommands: Set<String> = ["mv", "cp", "mkdir", "ln"]
 
     static func importDeb(at debUrl: URL, into destinationFolder: URL) throws -> DebImportResult {
@@ -227,6 +236,7 @@ enum DebImporter {
             NSLog("[LC] deb import: failed to install payload for \(tweakName): \(error)")
             return []
         }
+        fm.createFile(atPath: tweakDir.appendingPathComponent(debTweakMarkerName).path, contents: nil)
 
         // absolute path (as the tweak's own compiled-in strings would reference it) -> where
         // we actually put it, so the native path-redirect hook in TweakLoader can resolve it.
@@ -242,6 +252,39 @@ enum DebImporter {
         // tweak is re-imported. Storing a root-relative path and letting DebPathRedirect.m
         // re-resolve it against whichever root is actually current at each launch keeps the
         // mapping valid across both.
+        // Some tweaks reference dependencies -- their own co-bundled ones (e.g. a Swift
+        // runtime framework shipped in the same .deb) as well as ones from a *different*
+        // tweak entirely (e.g. one package's dylib linking a shared framework a separate
+        // "support library" package installs) -- via "@loader_path/.jbroot/..." instead of
+        // @rpath. ".jbroot" is a convention from real rootless jailbreaks: a symlink next to
+        // every installed dylib pointing back at the (possibly randomized) real jailbreak
+        // root, so tweaks find absolute-looking paths without hardcoding where the root
+        // actually is. dyld resolves that symlink itself at dlopen time.
+        //
+        // Every deb-imported tweak's own payload lives nested under its own subfolder
+        // (Tweaks/<tweakName>/...), so a ".jbroot" pointing at just *that* tweak's own
+        // subfolder would resolve same-package dependencies but never find another
+        // package's files. Instead, every tweak's ".jbroot" points at one shared location,
+        // Tweaks/.lc_shared_jbroot -- a flat mirror (see rebuildSharedJbroot) of every
+        // framework/bundle across *every* currently-imported tweak, keyed by original
+        // absolute path -- so cross-package and same-package dependencies resolve the same
+        // way. It's rebuilt on every import, so import order doesn't matter: a tweak
+        // imported before its dependency still finds it once the dependency is imported,
+        // without needing to be re-patched itself. This does NOT help a dependency on a
+        // real system library that was never shipped in any .deb (e.g. libroothide.dylib
+        // itself) -- there's nothing on disk for the mirror to point at.
+        func createJbrootSymlink(in directory: URL) {
+            let components = directory.pathComponents
+            guard let tweakNameIndex = components.lastIndex(of: tweakName) else { return }
+            // +1: one more hop than reaching tweakDir, to reach destination (where
+            // .lc_shared_jbroot lives, alongside every tweak's own subfolder).
+            let upsToDestination = (components.count - (tweakNameIndex + 1)) + 1
+            let upPath = Array(repeating: "..", count: upsToDestination).joined(separator: "/")
+            let jbrootUrl = directory.appendingPathComponent(".jbroot")
+            try? fm.removeItem(at: jbrootUrl)
+            try? fm.createSymbolicLink(atPath: jbrootUrl.path, withDestinationPath: upPath + "/.lc_shared_jbroot")
+        }
+
         var redirects: [String: String] = [:]
         func recordRedirect(for url: URL) {
             // Locate our own tweakDir folder name in the path and take everything after it,
@@ -274,6 +317,7 @@ enum DebImporter {
                 if isDir.boolValue, ext == "framework" {
                     patchRPath(at: url)
                     recordRedirect(for: url)
+                    createJbrootSymlink(in: url)
                     enumerator.skipDescendants()
                 } else if isDir.boolValue, ext == "bundle" {
                     // resource bundles aren't Mach-O, but they're still referenced by
@@ -282,12 +326,44 @@ enum DebImporter {
                     enumerator.skipDescendants()
                 } else if !isDir.boolValue, ext == "dylib" {
                     patchRPath(at: url)
+                    createJbrootSymlink(in: url.deletingLastPathComponent())
                 }
             }
         }
 
         recordRedirects(redirects, in: destination)
+        rebuildSharedJbroot(in: destination)
         return [tweakName]
+    }
+
+    // Rebuilds Tweaks/.lc_shared_jbroot (or the app-group equivalent) from scratch as a flat
+    // mirror of every framework/bundle any deb-imported tweak under `destination` has ever
+    // registered a redirect for -- the merged .lc_deb_redirects.plist is already exactly
+    // that data, keyed by the resource's original absolute path, so this just re-expresses
+    // each bare-path entry (skipping the "/var/jb"-prefixed duplicate of the same entry, and
+    // the "id:"-prefixed identifier entries, which aren't filesystem paths) as a symlink at
+    // the matching location under .lc_shared_jbroot. Every tweak's own ".jbroot" symlink
+    // (see createJbrootSymlink) and the extra rpath LCPatchAddRPath adds both point at this
+    // fixed location, so refreshing its contents here is all that's needed to pick up a
+    // newly-imported tweak's resources -- no other tweak needs to be re-patched.
+    private static func rebuildSharedJbroot(in destination: URL) {
+        let fm = FileManager.default
+        let plistUrl = destination.appendingPathComponent(".lc_deb_redirects.plist")
+        guard let merged = NSDictionary(contentsOf: plistUrl) as? [String: String] else { return }
+
+        let sharedRoot = destination.appendingPathComponent(".lc_shared_jbroot")
+        try? fm.removeItem(at: sharedRoot)
+        try? fm.createDirectory(at: sharedRoot, withIntermediateDirectories: true)
+
+        for (from, to) in merged {
+            guard from.hasPrefix("/"), !from.hasPrefix("/var/jb/") else { continue }
+            let relativeComponents = from.split(separator: "/").map(String.init)
+            guard !relativeComponents.isEmpty else { continue }
+            let symlinkUrl = sharedRoot.appendingPathComponent(relativeComponents.joined(separator: "/"))
+            try? fm.createDirectory(at: symlinkUrl.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let upPath = Array(repeating: "..", count: relativeComponents.count).joined(separator: "/")
+            try? fm.createSymbolicLink(atPath: symlinkUrl.path, withDestinationPath: upPath + "/" + to)
+        }
     }
 
     private static func recordRedirects(_ redirects: [String: String], in destination: URL) {
