@@ -5,13 +5,38 @@
 #include <stdlib.h>
 #include <string.h>
 
-// NSLog/os_log redact %@ arguments as <private> by default, and the {public} privacy
-// annotation to opt back in isn't reliably decoded by every syslog client. Side-step both
-// by doing our own string formatting first and handing NSLog the finished message through
-// a single plain %s -- no object argument left for the logging system to redact or for a
-// client to mis-decode.
+// NSLog/os_log redact string arguments (both %@ and %s) as <private> by default, and no
+// syslog client available for testing could decode the {public} privacy override cleanly
+// either. Buffer every diagnostic line in memory instead, and dump it via a deliberate
+// uncaught exception a few seconds after the hooks install -- LCBootstrap.m already installs
+// NSSetUncaughtExceptionHandler and stores the exception's reason+backtrace in UserDefaults
+// under "error", which LCTabView.swift shows as a copyable crash-report sheet next time
+// LiveContainer's own UI (not the guest app) is opened. That path isn't subject to the
+// unified log's privacy redaction at all since it's just a plist value, not an os_log call.
+static NSMutableArray<NSString *> *sDiagnosticLines;
+static NSObject *sDiagnosticLock;
+static NSUInteger sDiagnosticGeneration;
+
+// Debounced: each new log line pushes the dump back another 6 seconds, so it fires 6 seconds
+// after diagnostic activity actually quiets down rather than at some arbitrary fixed point the
+// tester might not have finished navigating to by then.
+static void scheduleDiagnosticsDump(void) {
+    NSUInteger myGeneration = ++sDiagnosticGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (myGeneration != sDiagnosticGeneration) return; // superseded by more recent activity
+        NSString *dump = [sDiagnosticLines componentsJoinedByString:@"\n"];
+        [NSException raise:@"LCDebPathRedirectDiagnostics" format:@"%@", dump];
+    });
+}
+
 static void lclog(NSString *msg) {
-    NSLog(@"%{public}s", msg.UTF8String);
+    if (!sDiagnosticLock) sDiagnosticLock = [NSObject new];
+    @synchronized (sDiagnosticLock) {
+        if (!sDiagnosticLines) sDiagnosticLines = [NSMutableArray new];
+        [sDiagnosticLines addObject:msg];
+    }
+    NSLog(@"%@", msg);
+    scheduleDiagnosticsDump();
 }
 
 // Redirect table: each entry maps an absolute path prefix a deb-imported tweak's
@@ -52,7 +77,7 @@ static const char *rewritePath(const char *path) {
             (path[r->fromLen] == '\0' || path[r->fromLen] == '/')) {
             static __thread char buffer[PATH_MAX];
             snprintf(buffer, sizeof(buffer), "%s%s", r->to, path + r->fromLen);
-            NSLog(@"[LC] DebPathRedirect: %{public}s -> %{public}s", path, buffer);
+            lclog([NSString stringWithFormat:@"[LC] DebPathRedirect: %s -> %s", path, buffer]);
             return buffer;
         }
     }
@@ -158,6 +183,11 @@ static NSURL *lc_debRewriteFileURL(NSURL *url) {
 @end
 
 void DebPathRedirectInit(NSString *globalTweakFolder, NSString *selectedTweakFolderPath) {
+    // TEMPORARY DIAGNOSTIC ONLY -- remove before merging. Scheduled unconditionally, up front,
+    // so we get a crash-report dump (see LCBootstrap.m's exceptionHandler / LCTabView's
+    // crashReportShow) of everything logged below no matter which path this function takes.
+    scheduleDiagnosticsDump();
+
     lclog([NSString stringWithFormat:@"[LC] DebPathRedirect: init globalTweakFolder=%@ selectedTweakFolderPath=%@", globalTweakFolder, selectedTweakFolderPath]);
     NSMutableDictionary<NSString *, NSString *> *merged = [NSMutableDictionary new];
     if (globalTweakFolder) {
