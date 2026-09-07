@@ -11,7 +11,7 @@
 // a single plain %s -- no object argument left for the logging system to redact or for a
 // client to mis-decode.
 static void lclog(NSString *msg) {
-    NSLog(@"%s", msg.UTF8String);
+    NSLog(@"%{public}s", msg.UTF8String);
 }
 
 // Redirect table: each entry maps an absolute path prefix a deb-imported tweak's
@@ -52,7 +52,7 @@ static const char *rewritePath(const char *path) {
             (path[r->fromLen] == '\0' || path[r->fromLen] == '/')) {
             static __thread char buffer[PATH_MAX];
             snprintf(buffer, sizeof(buffer), "%s%s", r->to, path + r->fromLen);
-            NSLog(@"[LC] DebPathRedirect: %s -> %s", path, buffer);
+            NSLog(@"[LC] DebPathRedirect: %{public}s -> %{public}s", path, buffer);
             return buffer;
         }
     }
