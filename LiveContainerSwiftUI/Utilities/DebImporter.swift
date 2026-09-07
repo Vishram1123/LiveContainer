@@ -229,7 +229,19 @@ enum DebImporter {
         }
 
         // absolute path (as the tweak's own compiled-in strings would reference it) -> where
-        // we actually put it, so the native path-redirect hook in TweakLoader can resolve it
+        // we actually put it, so the native path-redirect hook in TweakLoader can resolve it.
+        //
+        // The "where we put it" side is stored *relative to destination* (the tweak-folder
+        // root), not as an absolute path: destination lives inside LiveContainer's own app
+        // container (LCPath.tweakPath) or the shared app-group container
+        // (LCPath.lcGroupTweakPath), and both of those roots can change out from under an
+        // already-imported tweak -- LiveContainer being reinstalled/updated gets a brand new
+        // sandbox container UUID, and "convert app to shared" physically moves the whole
+        // tweak folder from one root to the other. An absolute path baked in at import time
+        // goes stale the moment either happens, silently breaking every redirect until the
+        // tweak is re-imported. Storing a root-relative path and letting DebPathRedirect.m
+        // re-resolve it against whichever root is actually current at each launch keeps the
+        // mapping valid across both.
         var redirects: [String: String] = [:]
         func recordRedirect(for url: URL) {
             // Locate our own tweakDir folder name in the path and take everything after it,
@@ -243,13 +255,14 @@ enum DebImporter {
             let relativeComponents = Array(components.dropFirst(tweakNameIndex + 1))
             guard !relativeComponents.isEmpty else { return }
             let barePath = "/" + relativeComponents.joined(separator: "/")
-            redirects[barePath] = url.path
-            redirects["/var/jb" + barePath] = url.path
+            let relativeToDestination = tweakName + "/" + relativeComponents.joined(separator: "/")
+            redirects[barePath] = relativeToDestination
+            redirects["/var/jb" + barePath] = relativeToDestination
             // also index by the bundle/framework's own CFBundleIdentifier, for tweaks that
             // look their bundle up that way instead of by a hardcoded path
             if let info = NSDictionary(contentsOf: url.appendingPathComponent("Info.plist")),
                let identifier = info["CFBundleIdentifier"] as? String {
-                redirects["id:" + identifier] = url.path
+                redirects["id:" + identifier] = relativeToDestination
             }
         }
 

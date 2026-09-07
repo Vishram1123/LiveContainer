@@ -51,14 +51,20 @@ static void lclog(NSString *msg) {
     scheduleDiagnosticsDump();
 }
 
-static void loadRedirectsFromPlist(NSString *plistPath, NSMutableDictionary<NSString *, NSString *> *merged) {
+// Values in the plist are stored relative to baseFolder (the tweak-folder root the plist
+// itself lives in), not as absolute paths -- that root can move (LiveContainer reinstalled
+// with a new sandbox container UUID, or the tweak folder relocated by "convert to shared"),
+// so the absolute destination is reconstructed fresh against whichever root is current at
+// each launch instead of being baked in at import time. See DebImporter.swift for the write
+// side of this.
+static void loadRedirectsFromPlist(NSString *plistPath, NSString *baseFolder, NSMutableDictionary<NSString *, NSString *> *merged) {
     NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:plistPath];
     lclog([NSString stringWithFormat:@"[LC] DebPathRedirect: reading %@ -> %@ entries", plistPath, dict ? @(dict.count) : @"none/unreadable"]);
     if (![dict isKindOfClass:NSDictionary.class]) return;
     for (NSString *from in dict) {
         id to = dict[from];
         if ([from isKindOfClass:NSString.class] && [to isKindOfClass:NSString.class]) {
-            merged[from] = to;
+            merged[from] = [baseFolder stringByAppendingPathComponent:(NSString *)to];
         }
     }
 }
@@ -189,10 +195,10 @@ void DebPathRedirectInit(NSString *globalTweakFolder, NSString *selectedTweakFol
     lclog([NSString stringWithFormat:@"[LC] DebPathRedirect: init globalTweakFolder=%@ selectedTweakFolderPath=%@", globalTweakFolder, selectedTweakFolderPath]);
     NSMutableDictionary<NSString *, NSString *> *merged = [NSMutableDictionary new];
     if (globalTweakFolder) {
-        loadRedirectsFromPlist([globalTweakFolder stringByAppendingPathComponent:@".lc_deb_redirects.plist"], merged);
+        loadRedirectsFromPlist([globalTweakFolder stringByAppendingPathComponent:@".lc_deb_redirects.plist"], globalTweakFolder, merged);
     }
     if (selectedTweakFolderPath) {
-        loadRedirectsFromPlist([selectedTweakFolderPath stringByAppendingPathComponent:@".lc_deb_redirects.plist"], merged);
+        loadRedirectsFromPlist([selectedTweakFolderPath stringByAppendingPathComponent:@".lc_deb_redirects.plist"], selectedTweakFolderPath, merged);
     }
     lclog([NSString stringWithFormat:@"[LC] DebPathRedirect: merged %lu entries: %@", (unsigned long)merged.count, merged]);
     if (merged.count == 0) return;
