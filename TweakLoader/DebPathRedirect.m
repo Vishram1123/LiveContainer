@@ -1,12 +1,8 @@
 #import "DebPathRedirect.h"
-#include "../litehook/src/litehook.h"
-#include <dirent.h>
-#include <fcntl.h>
-#include <stdarg.h>
-#include <stdio.h>
+#import "../LiveContainer/utils.h"
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 // Redirect table: each entry maps an absolute path prefix a deb-imported tweak's
 // compiled-in strings might reference (e.g. "/Library/Application Support/Foo.bundle"
@@ -47,48 +43,71 @@ static const char *rewritePath(const char *path) {
     return path;
 }
 
-static int (*orig_open)(const char *, int, ...) = open;
-static int lc_open(const char *path, int oflag, ...) {
-    mode_t mode = 0;
-    if (oflag & O_CREAT) {
-        va_list args;
-        va_start(args, oflag);
-        mode = (mode_t)va_arg(args, int);
-        va_end(args);
-        return orig_open(rewritePath(path), oflag, mode);
-    }
-    return orig_open(rewritePath(path), oflag);
+// NSBundle/CFBundle and NSFileManager do their actual filesystem work (stat/open) from
+// inside CoreFoundation/Foundation, which live in the dyld shared cache -- calls a shared
+// cache image makes to another shared cache image aren't interposable by rebinding a plain
+// C symbol like open()/stat(), since the cache uses direct, pre-bound stubs for those
+// intra-cache calls. Objective-C method dispatch isn't affected by that: it always goes
+// through the class's method list, so swizzling the handful of NSBundle/NSFileManager
+// entry points a tweak's own (non-cache) code calls into is what actually reaches these
+// calls, the same way NSBundle+FixCydiaSubstrate.m and NSFileManager+GuestHooks.m already
+// swizzle Foundation methods elsewhere in this codebase.
+static NSString *lc_debRewritePath(NSString *path) {
+    if (!path) return path;
+    const char *original = path.fileSystemRepresentation;
+    const char *rewritten = rewritePath(original);
+    if (rewritten == original) return path;
+    return [NSString stringWithUTF8String:rewritten];
 }
 
-static int (*orig_stat)(const char *, struct stat *) = stat;
-static int lc_stat(const char *path, struct stat *buf) {
-    return orig_stat(rewritePath(path), buf);
+static NSURL *lc_debRewriteFileURL(NSURL *url) {
+    if (!url || !url.isFileURL) return url;
+    NSString *rewritten = lc_debRewritePath(url.path);
+    if ([rewritten isEqualToString:url.path]) return url;
+    return [NSURL fileURLWithPath:rewritten];
 }
 
-static int (*orig_lstat)(const char *, struct stat *) = lstat;
-static int lc_lstat(const char *path, struct stat *buf) {
-    return orig_lstat(rewritePath(path), buf);
+@interface NSBundle (LCDebRedirect)
+@end
+
+@implementation NSBundle (LCDebRedirect)
+
++ (instancetype)lc_debRedirect_bundleWithPath:(NSString *)path {
+    return [self lc_debRedirect_bundleWithPath:lc_debRewritePath(path)];
 }
 
-static int (*orig_access)(const char *, int) = access;
-static int lc_access(const char *path, int mode) {
-    return orig_access(rewritePath(path), mode);
+- (instancetype)lc_debRedirect_initWithPath:(NSString *)path {
+    return [self lc_debRedirect_initWithPath:lc_debRewritePath(path)];
 }
 
-static char *(*orig_realpath)(const char *, char *) = realpath;
-static char *lc_realpath(const char *path, char *resolved) {
-    return orig_realpath(rewritePath(path), resolved);
++ (instancetype)lc_debRedirect_bundleWithURL:(NSURL *)url {
+    return [self lc_debRedirect_bundleWithURL:lc_debRewriteFileURL(url)];
 }
 
-static FILE *(*orig_fopen)(const char *, const char *) = fopen;
-static FILE *lc_fopen(const char *path, const char *mode) {
-    return orig_fopen(rewritePath(path), mode);
+- (instancetype)lc_debRedirect_initWithURL:(NSURL *)url {
+    return [self lc_debRedirect_initWithURL:lc_debRewriteFileURL(url)];
 }
 
-static DIR *(*orig_opendir)(const char *) = opendir;
-static DIR *lc_opendir(const char *path) {
-    return orig_opendir(rewritePath(path));
+@end
+
+@interface NSFileManager (LCDebRedirect)
+@end
+
+@implementation NSFileManager (LCDebRedirect)
+
+- (BOOL)lc_debRedirect_fileExistsAtPath:(NSString *)path {
+    return [self lc_debRedirect_fileExistsAtPath:lc_debRewritePath(path)];
 }
+
+- (BOOL)lc_debRedirect_fileExistsAtPath:(NSString *)path isDirectory:(BOOL *)isDirectory {
+    return [self lc_debRedirect_fileExistsAtPath:lc_debRewritePath(path) isDirectory:isDirectory];
+}
+
+- (NSArray<NSString *> *)lc_debRedirect_contentsOfDirectoryAtPath:(NSString *)path error:(NSError **)error {
+    return [self lc_debRedirect_contentsOfDirectoryAtPath:lc_debRewritePath(path) error:error];
+}
+
+@end
 
 void DebPathRedirectInit(NSString *globalTweakFolder, NSString *selectedTweakFolderPath) {
     NSMutableDictionary<NSString *, NSString *> *merged = [NSMutableDictionary new];
@@ -114,11 +133,12 @@ void DebPathRedirectInit(NSString *globalTweakFolder, NSString *selectedTweakFol
         return (int)(((const LCDebRedirect *)b)->fromLen - ((const LCDebRedirect *)a)->fromLen);
     });
 
-    litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, open, lc_open, nil);
-    litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, stat, lc_stat, nil);
-    litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, lstat, lc_lstat, nil);
-    litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, access, lc_access, nil);
-    litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, realpath, lc_realpath, nil);
-    litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, fopen, lc_fopen, nil);
-    litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, opendir, lc_opendir, nil);
+    swizzleClassMethod(NSBundle.class, @selector(bundleWithPath:), @selector(lc_debRedirect_bundleWithPath:));
+    swizzle(NSBundle.class, @selector(initWithPath:), @selector(lc_debRedirect_initWithPath:));
+    swizzleClassMethod(NSBundle.class, @selector(bundleWithURL:), @selector(lc_debRedirect_bundleWithURL:));
+    swizzle(NSBundle.class, @selector(initWithURL:), @selector(lc_debRedirect_initWithURL:));
+
+    swizzle(NSFileManager.class, @selector(fileExistsAtPath:), @selector(lc_debRedirect_fileExistsAtPath:));
+    swizzle(NSFileManager.class, @selector(fileExistsAtPath:isDirectory:), @selector(lc_debRedirect_fileExistsAtPath:isDirectory:));
+    swizzle(NSFileManager.class, @selector(contentsOfDirectoryAtPath:error:), @selector(lc_debRedirect_contentsOfDirectoryAtPath:error:));
 }

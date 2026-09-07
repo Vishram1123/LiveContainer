@@ -28,39 +28,11 @@ extension LCUtils {
         }
         
         // check if re-sign is needed
-        // if signature is invalid, we need to re-sign. dylib and framework's main binary are supported
-        let fileURLs = try fm.contentsOfDirectory(at: tweakFolderUrl, includingPropertiesForKeys: nil)
+        // if signature is invalid, we need to re-sign. dylib and framework's main binary are supported.
+        // Plain subfolders (manually-organized tweaks, or a deb-imported tweak's own folder) are
+        // recursed into so nested dylibs/frameworks get signed too.
+        let filesToSign = collectFilesToSign(in: tweakFolderUrl, force: force, fm: fm)
 
-        var filesToSign: [URL] = []
-        
-        for fileURL in fileURLs {
-            var fileURL = fileURL
-            let attributes = try fm.attributesOfItem(atPath: fileURL.path)
-            let fileType = attributes[.type] as? FileAttributeType
-            if(fileType != FileAttributeType.typeDirectory && fileType != FileAttributeType.typeRegular) {
-                continue
-            }
-            let name = fileURL.lastPathComponent
-            let baseName = name.hasSuffix(".disabled") ? String(name.dropLast(".disabled".count)) : name
-            if(fileType == FileAttributeType.typeDirectory) {
-                if(!baseName.hasSuffix(".framework")) {
-                    continue
-                }
-                guard let frameworkBundle = Bundle(url: fileURL), let executableURL = frameworkBundle.executableURL else {
-                    continue
-                }
-                fileURL = executableURL
-            } else if (fileType == FileAttributeType.typeRegular && !baseName.hasSuffix(".dylib")) {
-                continue
-            }
-
-            if !force, checkCodeSignature((fileURL.path as NSString).utf8String) {
-                continue;
-            }
-            
-            filesToSign.append(fileURL)
-        }
-        
         if filesToSign.isEmpty {
             return
         }
@@ -87,7 +59,45 @@ extension LCUtils {
             }
         })
     }
-        
+
+    private static func collectFilesToSign(in folderUrl: URL, force: Bool, fm: FileManager) -> [URL] {
+        guard let fileURLs = try? fm.contentsOfDirectory(at: folderUrl, includingPropertiesForKeys: nil) else {
+            return []
+        }
+        var result: [URL] = []
+        for fileURL in fileURLs {
+            var fileURL = fileURL
+            guard let attributes = try? fm.attributesOfItem(atPath: fileURL.path) else { continue }
+            let fileType = attributes[.type] as? FileAttributeType
+            guard fileType == .typeDirectory || fileType == .typeRegular else { continue }
+
+            let name = fileURL.lastPathComponent
+            let baseName = name.hasSuffix(".disabled") ? String(name.dropLast(".disabled".count)) : name
+
+            if fileType == .typeDirectory {
+                if baseName.hasSuffix(".framework") {
+                    guard let frameworkBundle = Bundle(url: fileURL), let executableURL = frameworkBundle.executableURL else {
+                        continue
+                    }
+                    fileURL = executableURL
+                } else {
+                    // a plain organizational/tweak subfolder -- recurse, unless disabled as a whole
+                    if name.hasSuffix(".disabled") { continue }
+                    result.append(contentsOf: collectFilesToSign(in: fileURL, force: force, fm: fm))
+                    continue
+                }
+            } else if !baseName.hasSuffix(".dylib") {
+                continue
+            }
+
+            if !force, checkCodeSignature((fileURL.path as NSString).utf8String) {
+                continue
+            }
+            result.append(fileURL)
+        }
+        return result
+    }
+
     private static func authenticateUser(completion: @escaping (Bool, Error?) -> Void) {
         // Create a context for authentication
         let context = LAContext()

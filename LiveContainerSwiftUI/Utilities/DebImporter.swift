@@ -30,12 +30,6 @@ struct DebImportResult {
 }
 
 enum DebImporter {
-    // Rootless tweaks put their dylib under this path (with or without a leading /var/jb
-    // prefix, depending on how the .deb was built); we match on the trailing path components
-    // only so both conventions resolve the same way. Resource bundles/frameworks aren't
-    // pinned to one directory convention -- see installPayload below.
-    private static let dynamicLibrariesSuffix = ["Library", "MobileSubstrate", "DynamicLibraries"]
-
     private static let supportedScriptCommands: Set<String> = ["mv", "cp", "mkdir", "ln"]
 
     static func importDeb(at debUrl: URL, into destinationFolder: URL) throws -> DebImportResult {
@@ -82,11 +76,35 @@ enum DebImporter {
             }
         }
 
-        // Step 4: find the payload under the well-known rootless tweak dirs and
-        // hand it to the same folder the manual dylib/framework importer uses.
-        let installedNames = installPayload(from: dataDir, into: destinationFolder)
+        // Step 4: name the tweak (control's Name/Package field, else the .deb's own
+        // filename) and mirror its whole payload tree into a subfolder of that name so
+        // the original layout -- and thus every resource path inside it -- is preserved.
+        let controlFileUrl = workDir.appendingPathComponent("control").appendingPathComponent("control")
+        var tweakName: String?
+        if let controlText = try? String(contentsOf: controlFileUrl, encoding: .utf8) {
+            tweakName = parseControlField("Name", from: controlText) ?? parseControlField("Package", from: controlText)
+        }
+        let resolvedTweakName = sanitizeFolderName(tweakName ?? debUrl.deletingPathExtension().lastPathComponent)
+
+        let installedNames = installPayload(from: dataDir, into: destinationFolder, tweakName: resolvedTweakName)
 
         return DebImportResult(installedNames: installedNames, unsupportedScriptLines: unsupportedLines)
+    }
+
+    private static func parseControlField(_ key: String, from control: String) -> String? {
+        for line in control.split(separator: "\n") {
+            guard let colonIndex = line.firstIndex(of: ":") else { continue }
+            let fieldName = line[line.startIndex..<colonIndex].trimmingCharacters(in: .whitespaces)
+            guard fieldName == key else { continue }
+            let value = line[line.index(after: colonIndex)...].trimmingCharacters(in: .whitespaces)
+            return value.isEmpty ? nil : value
+        }
+        return nil
+    }
+
+    private static func sanitizeFolderName(_ raw: String) -> String {
+        let cleaned = raw.replacingOccurrences(of: "/", with: "-").trimmingCharacters(in: .whitespaces)
+        return cleaned.isEmpty ? "Tweak" : cleaned
     }
 
     // MARK: - Safe control-script subset
@@ -181,93 +199,68 @@ enum DebImporter {
     }
 
     // MARK: - Payload layout remap
+    //
+    // The whole data.tar payload is mirrored as-is under <destination>/<tweakName>/, so
+    // the tweak's own directory structure (and thus every relative reference inside it)
+    // stays intact -- TweakLoader.m already recurses arbitrarily deep looking for
+    // .dylib/.framework, so nesting doesn't stop it from finding them. Anything the
+    // tweak's binary references by *absolute* path (its own bundle, typically) needs a
+    // redirect entry since that path no longer exists on disk -- see recordRedirects.
 
-    private static func pathEndsWith(_ url: URL, _ suffix: [String]) -> Bool {
-        let comps = url.pathComponents
-        guard comps.count >= suffix.count else { return false }
-        return zip(comps.suffix(suffix.count), suffix).allSatisfy { $0.caseInsensitiveCompare($1) == .orderedSame }
-    }
-
-    private static func installPayload(from dataRoot: URL, into destination: URL) -> [String] {
+    private static func installPayload(from dataRoot: URL, into destination: URL, tweakName: String) -> [String] {
         let fm = FileManager.default
-        var installed: [String] = []
+
+        // rootless packages nest everything under var/jb; unwrap that so the mirrored
+        // tree starts at Library/... regardless of which convention the .deb used
+        var effectiveRoot = dataRoot
+        let varJbRoot = dataRoot.appendingPathComponent("var/jb")
+        var isVarJbDir: ObjCBool = false
+        if fm.fileExists(atPath: varJbRoot.path, isDirectory: &isVarJbDir), isVarJbDir.boolValue {
+            effectiveRoot = varJbRoot
+        }
+
+        let tweakDir = destination.appendingPathComponent(tweakName)
+        try? fm.removeItem(at: tweakDir)
+        do {
+            try fm.copyItem(at: effectiveRoot, to: tweakDir)
+        } catch {
+            NSLog("[LC] deb import: failed to install payload for \(tweakName): \(error)")
+            return []
+        }
+
         // absolute path (as the tweak's own compiled-in strings would reference it) -> where
         // we actually put it, so the native path-redirect hook in TweakLoader can resolve it
         var redirects: [String: String] = [:]
-
-        var dynamicLibDirs: [URL] = []
-        var resourceDirs: [URL] = []
-
-        if let enumerator = fm.enumerator(at: dataRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
-            for case let url as URL in enumerator {
-                var isDir: ObjCBool = false
-                guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { continue }
-                if pathEndsWith(url, dynamicLibrariesSuffix) {
-                    dynamicLibDirs.append(url)
-                    continue
-                }
-                // Tweaks stash their resource bundles/frameworks all over the place --
-                // Library/PreferenceBundles, Library/Frameworks, Library/Application Support,
-                // vendor-specific folders, etc. Rather than enumerate every convention, grab
-                // any *.framework/*.bundle directory wherever it lives, and don't descend into
-                // it any further (its contents are copied as one unit).
-                let ext = url.pathExtension.lowercased()
-                if ext == "framework" || ext == "bundle" {
-                    resourceDirs.append(url)
-                    enumerator.skipDescendants()
-                }
-            }
-        }
-
-        // maps the absolute path form the tweak's own binary might reference (with or without
-        // the rootless /var/jb prefix) to where we're about to install this item.
-        func recordRedirect(for itemUrl: URL, installedAt dest: URL) {
-            var relativeComponents = Array(itemUrl.pathComponents.dropFirst(dataRoot.pathComponents.count))
-            if relativeComponents.count >= 2, relativeComponents[0] == "var", relativeComponents[1] == "jb" {
-                relativeComponents.removeFirst(2)
-            }
+        func recordRedirect(for url: URL) {
+            let relativeComponents = Array(url.pathComponents.dropFirst(tweakDir.pathComponents.count))
             guard !relativeComponents.isEmpty else { return }
             let barePath = "/" + relativeComponents.joined(separator: "/")
-            let rootlessPath = "/var/jb" + barePath
-            redirects[barePath] = dest.path
-            redirects[rootlessPath] = dest.path
+            redirects[barePath] = url.path
+            redirects["/var/jb" + barePath] = url.path
         }
 
-        func install(_ itemUrl: URL, patchMachO: Bool, recordAsRedirect: Bool) {
-            let dest = destination.appendingPathComponent(itemUrl.lastPathComponent)
-            if fm.fileExists(atPath: dest.path) {
-                try? fm.removeItem(at: dest)
+        if let enumerator = fm.enumerator(at: tweakDir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+            for case let url as URL in enumerator {
+                var isDir: ObjCBool = false
+                guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
+                let ext = url.pathExtension.lowercased()
+                if isDir.boolValue, ext == "framework" {
+                    patchRPath(at: url)
+                    recordRedirect(for: url)
+                    enumerator.skipDescendants()
+                } else if isDir.boolValue, ext == "bundle" {
+                    // resource bundles aren't Mach-O, but they're still referenced by
+                    // absolute path just like frameworks are
+                    recordRedirect(for: url)
+                    enumerator.skipDescendants()
+                } else if !isDir.boolValue, ext == "dylib" {
+                    patchRPath(at: url)
+                }
             }
-            do {
-                try fm.copyItem(at: itemUrl, to: dest)
-            } catch {
-                NSLog("[LC] deb import: failed to install \(itemUrl.lastPathComponent): \(error)")
-                return
-            }
-            if patchMachO {
-                patchRPath(at: dest)
-            }
-            if recordAsRedirect {
-                recordRedirect(for: itemUrl, installedAt: dest)
-            }
-            installed.append(itemUrl.lastPathComponent)
-        }
-
-        for dir in dynamicLibDirs {
-            let children = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
-            for child in children {
-                let ext = child.pathExtension.lowercased()
-                guard ext == "dylib" || ext == "plist" else { continue }
-                install(child, patchMachO: ext == "dylib", recordAsRedirect: false)
-            }
-        }
-        for resourceDir in resourceDirs {
-            let ext = resourceDir.pathExtension.lowercased()
-            install(resourceDir, patchMachO: ext == "framework", recordAsRedirect: true)
         }
 
         recordRedirects(redirects, in: destination)
-        return installed
+        return [tweakName]
     }
 
     private static func recordRedirects(_ redirects: [String: String], in destination: URL) {
