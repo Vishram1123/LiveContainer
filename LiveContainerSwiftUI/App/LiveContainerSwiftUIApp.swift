@@ -79,6 +79,10 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
             try fm.createDirectory(at: LCPath.tweakPath, withIntermediateDirectories: true)
             let tweakDirs = try fm.contentsOfDirectory(atPath: LCPath.tweakPath.path)
             for tweakDir in tweakDirs {
+                // skip DebImporter's own bookkeeping (.lc_deb_redirects.plist, .lc_shared_jbroot)
+                if tweakDir.hasPrefix(".") {
+                    continue
+                }
                 let tweakDirUrl = LCPath.tweakPath.appendingPathComponent(tweakDir)
                 if !tweakDirUrl.hasDirectoryPath {
                     continue

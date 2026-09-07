@@ -2,7 +2,6 @@
 #import <UIKit/UIKit.h>
 #include <dlfcn.h>
 #include <objc/runtime.h>
-#include <string.h>
 #import "../LiveContainer/utils.h"
 #import "DebPathRedirect.h"
 
@@ -83,8 +82,6 @@ static void TweakLoaderConstructor() {
     const char *tweakFolderC = getenv("LC_GLOBAL_TWEAKS_FOLDER");
     NSString *globalTweakFolder = @(tweakFolderC);
     unsetenv("LC_GLOBAL_TWEAKS_FOLDER");
-    BOOL isGroupTweakFolder = getenv("LC_GLOBAL_TWEAKS_IS_GROUP") && !strcmp(getenv("LC_GLOBAL_TWEAKS_IS_GROUP"), "1");
-    unsetenv("LC_GLOBAL_TWEAKS_IS_GROUP");
     
     if([NSUserDefaults.guestAppInfo[@"dontInjectTweakLoader"] boolValue]) {
         // don't load any tweak since tweakloader is loaded after all initializers
@@ -107,7 +104,7 @@ static void TweakLoaderConstructor() {
     // (e.g. /Library/Application Support/Foo.bundle) to wherever DebImporter actually put them,
     // before any tweak dylib is dlopen'd and can go looking for them.
     NSString *selectedTweakFolderPath = tweakFolderName.length > 0 ? [globalTweakFolder stringByAppendingPathComponent:tweakFolderName] : nil;
-    DebPathRedirectInit(globalTweakFolder, selectedTweakFolderPath, isGroupTweakFolder);
+    DebPathRedirectInit(globalTweakFolder, selectedTweakFolderPath);
 
     // Load CydiaSubstrate
     const char *lcMainBundlePath;

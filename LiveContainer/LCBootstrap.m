@@ -350,7 +350,6 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
         tweakFolder = [docPath stringByAppendingPathComponent:@"Tweaks"];
     }
     setenv("LC_GLOBAL_TWEAKS_FOLDER", tweakFolder.UTF8String, 1);
-    setenv("LC_GLOBAL_TWEAKS_IS_GROUP", isSharedBundle ? "1" : "0", 1);
 
     // Update TweakLoader symlink
     NSString *tweakLoaderPath = [tweakFolder stringByAppendingPathComponent:@"TweakLoader.dylib"];
@@ -864,7 +863,6 @@ int LiveContainerMain(int argc, char *argv[]) {
             tweakFolder = [docPath stringByAppendingPathComponent:@"Tweaks"];
         }
         setenv("LC_GLOBAL_TWEAKS_FOLDER", tweakFolder.UTF8String, 1);
-        setenv("LC_GLOBAL_TWEAKS_IS_GROUP", isSharedBundle ? "1" : "0", 1);
 #if TARGET_OS_MACCATALYST || TARGET_OS_SIMULATOR
         extern void DyldHookLoadableIntoProcess(void);
         DyldHookLoadableIntoProcess();

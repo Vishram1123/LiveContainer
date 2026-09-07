@@ -69,6 +69,11 @@ struct LCTweakFolderView : View {
         let fm = FileManager()
         let files = try fm.contentsOfDirectory(atPath: baseUrl.path)
         for fileName in files {
+            // DebImporter's own bookkeeping (.lc_deb_redirects.plist, .lc_shared_jbroot)
+            // lives alongside the tweaks it manages rather than in a separate config
+            // location, but it isn't a tweak itself -- keep it out of the list the user
+            // browses/imports/deletes tweaks from.
+            if fileName.hasPrefix(".") { continue }
             let fileUrl = baseUrl.appendingPathComponent(fileName)
             var isFolder : ObjCBool = false
             fm.fileExists(atPath: fileUrl.path, isDirectory: &isFolder)
