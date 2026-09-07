@@ -7,7 +7,9 @@
 // Redirect table: each entry maps an absolute path prefix a deb-imported tweak's
 // compiled-in strings might reference (e.g. "/Library/Application Support/Foo.bundle"
 // or "/var/jb/Library/Frameworks/Foo.framework") to where DebImporter.swift actually
-// put that resource inside the LiveContainer tweak folder.
+// put that resource inside the LiveContainer tweak folder. Path keys start with "/";
+// entries prefixed "id:" instead map a bundle's own CFBundleIdentifier to its path, for
+// tweaks that look their bundle up by identifier rather than by path.
 typedef struct {
     char *from;
     size_t fromLen;
@@ -16,9 +18,12 @@ typedef struct {
 
 static LCDebRedirect *sRedirects = NULL;
 static NSUInteger sRedirectCount = 0;
+static LCDebRedirect *sIdentifierRedirects = NULL;
+static NSUInteger sIdentifierRedirectCount = 0;
 
 static void loadRedirectsFromPlist(NSString *plistPath, NSMutableDictionary<NSString *, NSString *> *merged) {
     NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+    NSLog(@"[LC] DebPathRedirect: reading %@ -> %@ entries", plistPath, dict ? @(dict.count) : @"none/unreadable");
     if (![dict isKindOfClass:NSDictionary.class]) return;
     for (NSString *from in dict) {
         id to = dict[from];
@@ -37,10 +42,21 @@ static const char *rewritePath(const char *path) {
             (path[r->fromLen] == '\0' || path[r->fromLen] == '/')) {
             static __thread char buffer[PATH_MAX];
             snprintf(buffer, sizeof(buffer), "%s%s", r->to, path + r->fromLen);
+            NSLog(@"[LC] DebPathRedirect: %s -> %s", path, buffer);
             return buffer;
         }
     }
     return path;
+}
+
+static const char *lookupIdentifierRedirect(const char *identifier) {
+    if (!identifier) return NULL;
+    for (NSUInteger i = 0; i < sIdentifierRedirectCount; i++) {
+        if (strcmp(identifier, sIdentifierRedirects[i].from) == 0) {
+            return sIdentifierRedirects[i].to;
+        }
+    }
+    return NULL;
 }
 
 // NSBundle/CFBundle and NSFileManager do their actual filesystem work (stat/open) from
@@ -73,19 +89,35 @@ static NSURL *lc_debRewriteFileURL(NSURL *url) {
 @implementation NSBundle (LCDebRedirect)
 
 + (instancetype)lc_debRedirect_bundleWithPath:(NSString *)path {
+    NSLog(@"[LC] DebPathRedirect: +[NSBundle bundleWithPath:%@]", path);
     return [self lc_debRedirect_bundleWithPath:lc_debRewritePath(path)];
 }
 
 - (instancetype)lc_debRedirect_initWithPath:(NSString *)path {
+    NSLog(@"[LC] DebPathRedirect: -[NSBundle initWithPath:%@]", path);
     return [self lc_debRedirect_initWithPath:lc_debRewritePath(path)];
 }
 
 + (instancetype)lc_debRedirect_bundleWithURL:(NSURL *)url {
+    NSLog(@"[LC] DebPathRedirect: +[NSBundle bundleWithURL:%@]", url);
     return [self lc_debRedirect_bundleWithURL:lc_debRewriteFileURL(url)];
 }
 
 - (instancetype)lc_debRedirect_initWithURL:(NSURL *)url {
+    NSLog(@"[LC] DebPathRedirect: -[NSBundle initWithURL:%@]", url);
     return [self lc_debRedirect_initWithURL:lc_debRewriteFileURL(url)];
+}
+
++ (instancetype)lc_debRedirect_bundleWithIdentifier:(NSString *)identifier {
+    NSBundle *result = [self lc_debRedirect_bundleWithIdentifier:identifier];
+    NSLog(@"[LC] DebPathRedirect: +[NSBundle bundleWithIdentifier:%@] -> %@", identifier, result);
+    if (result) return result;
+    const char *path = lookupIdentifierRedirect(identifier.UTF8String);
+    if (path) {
+        NSLog(@"[LC] DebPathRedirect: bundleWithIdentifier fallback %@ -> %s", identifier, path);
+        return [NSBundle bundleWithPath:[NSString stringWithUTF8String:path]];
+    }
+    return result;
 }
 
 @end
@@ -110,6 +142,7 @@ static NSURL *lc_debRewriteFileURL(NSURL *url) {
 @end
 
 void DebPathRedirectInit(NSString *globalTweakFolder, NSString *selectedTweakFolderPath) {
+    NSLog(@"[LC] DebPathRedirect: init globalTweakFolder=%@ selectedTweakFolderPath=%@", globalTweakFolder, selectedTweakFolderPath);
     NSMutableDictionary<NSString *, NSString *> *merged = [NSMutableDictionary new];
     if (globalTweakFolder) {
         loadRedirectsFromPlist([globalTweakFolder stringByAppendingPathComponent:@".lc_deb_redirects.plist"], merged);
@@ -117,28 +150,49 @@ void DebPathRedirectInit(NSString *globalTweakFolder, NSString *selectedTweakFol
     if (selectedTweakFolderPath) {
         loadRedirectsFromPlist([selectedTweakFolderPath stringByAppendingPathComponent:@".lc_deb_redirects.plist"], merged);
     }
+    NSLog(@"[LC] DebPathRedirect: merged %lu entries: %@", (unsigned long)merged.count, merged);
     if (merged.count == 0) return;
 
-    sRedirectCount = merged.count;
+    NSMutableArray<NSString *> *pathKeys = [NSMutableArray new];
+    NSMutableArray<NSString *> *identifierKeys = [NSMutableArray new];
+    for (NSString *key in merged) {
+        if ([key hasPrefix:@"id:"]) {
+            [identifierKeys addObject:key];
+        } else {
+            [pathKeys addObject:key];
+        }
+    }
+
+    sRedirectCount = pathKeys.count;
     sRedirects = calloc(sRedirectCount, sizeof(LCDebRedirect));
-    NSUInteger i = 0;
-    for (NSString *from in merged) {
+    for (NSUInteger i = 0; i < pathKeys.count; i++) {
+        NSString *from = pathKeys[i];
         sRedirects[i].from = strdup(from.fileSystemRepresentation);
         sRedirects[i].fromLen = strlen(sRedirects[i].from);
         sRedirects[i].to = strdup(merged[from].fileSystemRepresentation);
-        i++;
     }
     // longest (most specific) prefix first, so a nested path never matches a shorter parent by accident
     qsort_b(sRedirects, sRedirectCount, sizeof(LCDebRedirect), ^int(const void *a, const void *b) {
         return (int)(((const LCDebRedirect *)b)->fromLen - ((const LCDebRedirect *)a)->fromLen);
     });
 
+    sIdentifierRedirectCount = identifierKeys.count;
+    sIdentifierRedirects = calloc(sIdentifierRedirectCount, sizeof(LCDebRedirect));
+    for (NSUInteger i = 0; i < identifierKeys.count; i++) {
+        NSString *key = identifierKeys[i];
+        NSString *identifier = [key substringFromIndex:3];
+        sIdentifierRedirects[i].from = strdup(identifier.UTF8String);
+        sIdentifierRedirects[i].to = strdup(merged[key].fileSystemRepresentation);
+    }
+
     swizzleClassMethod(NSBundle.class, @selector(bundleWithPath:), @selector(lc_debRedirect_bundleWithPath:));
     swizzle(NSBundle.class, @selector(initWithPath:), @selector(lc_debRedirect_initWithPath:));
     swizzleClassMethod(NSBundle.class, @selector(bundleWithURL:), @selector(lc_debRedirect_bundleWithURL:));
     swizzle(NSBundle.class, @selector(initWithURL:), @selector(lc_debRedirect_initWithURL:));
+    swizzleClassMethod(NSBundle.class, @selector(bundleWithIdentifier:), @selector(lc_debRedirect_bundleWithIdentifier:));
 
     swizzle(NSFileManager.class, @selector(fileExistsAtPath:), @selector(lc_debRedirect_fileExistsAtPath:));
     swizzle(NSFileManager.class, @selector(fileExistsAtPath:isDirectory:), @selector(lc_debRedirect_fileExistsAtPath:isDirectory:));
     swizzle(NSFileManager.class, @selector(contentsOfDirectoryAtPath:error:), @selector(lc_debRedirect_contentsOfDirectoryAtPath:error:));
+    NSLog(@"[LC] DebPathRedirect: installed hooks (%lu path, %lu identifier redirects)", (unsigned long)sRedirectCount, (unsigned long)sIdentifierRedirectCount);
 }

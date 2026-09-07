@@ -92,7 +92,7 @@ static void TweakLoaderConstructor() {
     NSMutableArray *errors = [NSMutableArray new];
     
     NSArray<NSURL *> *globalTweaks = [NSFileManager.defaultManager contentsOfDirectoryAtURL:[NSURL fileURLWithPath:globalTweakFolder]
-    includingPropertiesForKeys:@[] options:0 error:nil];
+    includingPropertiesForKeys:@[NSURLIsDirectoryKey] options:0 error:nil];
     NSString *tweakFolderName = NSUserDefaults.guestAppInfo[@"LCTweakFolder"];
     
     if([globalTweaks count] <= 1 && tweakFolderName.length == 0) {
@@ -134,9 +134,18 @@ static void TweakLoaderConstructor() {
             NSLog(@"Skipping disabled global tweak %@", name);
             continue;
         }
-        NSString *error = loadTweakAtURL(fileURL);
-        if (error) {
-            [errors addObject:error];
+        NSNumber *isDirectory = nil;
+        [fileURL getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:nil];
+        // a deb-imported tweak lands in its own plain subfolder (mirroring its original
+        // layout) rather than as a loose .dylib/.framework, so recurse into it the same
+        // way the selected per-app tweak folder already does below.
+        if (isDirectory.boolValue && ![name hasSuffix:@".framework"]) {
+            loadTweaksRecursively(fileURL, errors);
+        } else {
+            NSString *error = loadTweakAtURL(fileURL);
+            if (error) {
+                [errors addObject:error];
+            }
         }
     }
 

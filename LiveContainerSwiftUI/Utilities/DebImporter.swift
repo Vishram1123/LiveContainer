@@ -237,6 +237,12 @@ enum DebImporter {
             let barePath = "/" + relativeComponents.joined(separator: "/")
             redirects[barePath] = url.path
             redirects["/var/jb" + barePath] = url.path
+            // also index by the bundle/framework's own CFBundleIdentifier, for tweaks that
+            // look their bundle up that way instead of by a hardcoded path
+            if let info = NSDictionary(contentsOf: url.appendingPathComponent("Info.plist")),
+               let identifier = info["CFBundleIdentifier"] as? String {
+                redirects["id:" + identifier] = url.path
+            }
         }
 
         if let enumerator = fm.enumerator(at: tweakDir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
