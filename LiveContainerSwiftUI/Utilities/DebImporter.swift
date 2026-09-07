@@ -219,6 +219,12 @@ enum DebImporter {
     private static func installPayload(from dataRoot: URL, into destination: URL, tweakName: String) -> [String] {
         let fm = FileManager.default
 
+        // one-time cleanup of on-disk artifacts an earlier build of this feature left
+        // behind, now that redirect data lives in NSUserDefaults and .lc_shared_jbroot is
+        // rebuilt fresh at launch instead of persisted here
+        try? fm.removeItem(at: destination.appendingPathComponent(".lc_deb_redirects.plist"))
+        try? fm.removeItem(at: destination.appendingPathComponent(".lc_shared_jbroot"))
+
         // rootless packages nest everything under var/jb; unwrap that so the mirrored
         // tree starts at Library/... regardless of which convention the .deb used
         var effectiveRoot = dataRoot
@@ -265,14 +271,15 @@ enum DebImporter {
         // (Tweaks/<tweakName>/...), so a ".jbroot" pointing at just *that* tweak's own
         // subfolder would resolve same-package dependencies but never find another
         // package's files. Instead, every tweak's ".jbroot" points at one shared location,
-        // Tweaks/.lc_shared_jbroot -- a flat mirror (see rebuildSharedJbroot) of every
-        // framework/bundle across *every* currently-imported tweak, keyed by original
-        // absolute path -- so cross-package and same-package dependencies resolve the same
-        // way. It's rebuilt on every import, so import order doesn't matter: a tweak
-        // imported before its dependency still finds it once the dependency is imported,
-        // without needing to be re-patched itself. This does NOT help a dependency on a
-        // real system library that was never shipped in any .deb (e.g. libroothide.dylib
-        // itself) -- there's nothing on disk for the mirror to point at.
+        // Tweaks/.lc_shared_jbroot -- a flat mirror, keyed by original absolute path, of
+        // every framework/bundle across *every* currently-imported tweak, so cross-package
+        // and same-package dependencies resolve the same way. DebPathRedirect.m rebuilds it
+        // fresh at every launch (from the same redirect data recordRedirects writes below),
+        // rather than DebImporter maintaining it as persistent, browsable on-disk state, so
+        // import order doesn't matter and nothing here needs to be re-patched when a new
+        // tweak is imported later. This does NOT help a dependency on a real system library
+        // that was never shipped in any .deb (e.g. libroothide.dylib itself) -- there's
+        // nothing for the mirror to point at.
         func createJbrootSymlink(in directory: URL) {
             let components = directory.pathComponents
             guard let tweakNameIndex = components.lastIndex(of: tweakName) else { return }
@@ -332,48 +339,40 @@ enum DebImporter {
         }
 
         recordRedirects(redirects, in: destination)
-        rebuildSharedJbroot(in: destination)
         return [tweakName]
     }
 
-    // Rebuilds Tweaks/.lc_shared_jbroot (or the app-group equivalent) from scratch as a flat
-    // mirror of every framework/bundle any deb-imported tweak under `destination` has ever
-    // registered a redirect for -- the merged .lc_deb_redirects.plist is already exactly
-    // that data, keyed by the resource's original absolute path, so this just re-expresses
-    // each bare-path entry (skipping the "/var/jb"-prefixed duplicate of the same entry, and
-    // the "id:"-prefixed identifier entries, which aren't filesystem paths) as a symlink at
-    // the matching location under .lc_shared_jbroot. Every tweak's own ".jbroot" symlink
-    // (see createJbrootSymlink) and the extra rpath LCPatchAddRPath adds both point at this
-    // fixed location, so refreshing its contents here is all that's needed to pick up a
-    // newly-imported tweak's resources -- no other tweak needs to be re-patched.
-    private static func rebuildSharedJbroot(in destination: URL) {
-        let fm = FileManager.default
-        let plistUrl = destination.appendingPathComponent(".lc_deb_redirects.plist")
-        guard let merged = NSDictionary(contentsOf: plistUrl) as? [String: String] else { return }
-
-        let sharedRoot = destination.appendingPathComponent(".lc_shared_jbroot")
-        try? fm.removeItem(at: sharedRoot)
-        try? fm.createDirectory(at: sharedRoot, withIntermediateDirectories: true)
-
-        for (from, to) in merged {
-            guard from.hasPrefix("/"), !from.hasPrefix("/var/jb/") else { continue }
-            let relativeComponents = from.split(separator: "/").map(String.init)
-            guard !relativeComponents.isEmpty else { continue }
-            let symlinkUrl = sharedRoot.appendingPathComponent(relativeComponents.joined(separator: "/"))
-            try? fm.createDirectory(at: symlinkUrl.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let upPath = Array(repeating: "..", count: relativeComponents.count).joined(separator: "/")
-            try? fm.createSymbolicLink(atPath: symlinkUrl.path, withDestinationPath: upPath + "/" + to)
-        }
-    }
-
+    // Redirect data is kept in NSUserDefaults (the App Group suite this codebase already
+    // uses for every other piece of persistent LiveContainer config, via
+    // LCUtils.appGroupUserDefault) instead of a dotfile inside the user-browsable Tweaks
+    // folder -- one top-level key per physical tweak-folder root, each holding a dictionary
+    // of scopes ("" for the root's own global entries, or a per-app-selected folder's name)
+    // so DebPathRedirect.m can read back exactly the two locations it already looks at
+    // (globalTweakFolder itself, and globalTweakFolder/<selected folder name>).
+    // Tweaks/.lc_shared_jbroot is no longer built here at all: DebPathRedirect.m rebuilds it
+    // fresh from this same data at every launch instead, so it's never a persistent,
+    // browsable on-disk artifact between launches.
     private static func recordRedirects(_ redirects: [String: String], in destination: URL) {
         guard !redirects.isEmpty else { return }
-        let plistUrl = destination.appendingPathComponent(".lc_deb_redirects.plist")
-        var merged = (NSDictionary(contentsOf: plistUrl) as? [String: String]) ?? [:]
+        let (key, scope) = debRedirectsConfigScope(for: destination)
+        let defaults = LCUtils.appGroupUserDefault
+        var allScopes = (defaults.dictionary(forKey: key) as? [String: [String: String]]) ?? [:]
+        var scopeEntries = allScopes[scope] ?? [:]
         for (from, to) in redirects {
-            merged[from] = to
+            scopeEntries[from] = to
         }
-        (merged as NSDictionary).write(to: plistUrl, atomically: true)
+        allScopes[scope] = scopeEntries
+        defaults.set(allScopes, forKey: key)
+    }
+
+    // The two physical tweak-folder roots (private vs. shared app-group) each get their own
+    // UserDefaults key; within each, "" is the root's own (global) scope and any other
+    // value is a per-app-selectable subfolder's name.
+    private static func debRedirectsConfigScope(for destination: URL) -> (key: String, scope: String) {
+        let isGroup = destination.path.hasPrefix(LCPath.lcGroupTweakPath.path)
+        let root = isGroup ? LCPath.lcGroupTweakPath : LCPath.tweakPath
+        let scope = destination.path == root.path ? "" : destination.lastPathComponent
+        return (isGroup ? "LCDebRedirectsGroup" : "LCDebRedirectsPrivate", scope)
     }
 
     // Same rpath fixup manual dylib/framework import already applies before signing.

@@ -21,20 +21,50 @@ static NSUInteger sRedirectCount = 0;
 static LCDebRedirect *sIdentifierRedirects = NULL;
 static NSUInteger sIdentifierRedirectCount = 0;
 
-// Values in the plist are stored relative to baseFolder (the tweak-folder root the plist
-// itself lives in), not as absolute paths -- that root can move (LiveContainer reinstalled
-// with a new sandbox container UUID, or the tweak folder relocated by "convert to shared"),
-// so the absolute destination is reconstructed fresh against whichever root is current at
-// each launch instead of being baked in at import time. See DebImporter.swift for the write
-// side of this.
-static void loadRedirectsFromPlist(NSString *plistPath, NSString *baseFolder, NSMutableDictionary<NSString *, NSString *> *merged) {
-    NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+// Redirect data lives in NSUserDefaults (the App Group suite this codebase already uses
+// for every other piece of persistent LiveContainer config) rather than a dotfile inside
+// the user-browsable Tweaks folder. DebImporter.swift writes one top-level key per
+// physical tweak-folder root (isGroupTweakFolder picks which), holding a dictionary of
+// scopes -- "" for the root's own (global) entries, or a per-app-selected folder's name --
+// each mapping a bare absolute path to a path *relative to that scope's own folder*. That
+// relative storage (rather than an absolute path baked in at import time) is what lets the
+// same entry keep resolving correctly however the container/root physically moves
+// (LiveContainer reinstalled with a new sandbox UUID, or the tweak folder relocated by
+// "convert to shared") -- reconstructing the absolute destination fresh, against whichever
+// root/scope is actually current, is exactly what this does.
+static void loadRedirectsFromDefaults(NSString *scopeFolder, NSString *scopeName, BOOL isGroupTweakFolder, NSMutableDictionary<NSString *, NSString *> *merged) {
+    NSString *udKey = isGroupTweakFolder ? @"LCDebRedirectsGroup" : @"LCDebRedirectsPrivate";
+    NSDictionary *allScopes = [NSUserDefaults.lcSharedDefaults dictionaryForKey:udKey];
+    if (![allScopes isKindOfClass:NSDictionary.class]) return;
+    NSDictionary *dict = allScopes[scopeName];
     if (![dict isKindOfClass:NSDictionary.class]) return;
     for (NSString *from in dict) {
         id to = dict[from];
         if ([from isKindOfClass:NSString.class] && [to isKindOfClass:NSString.class]) {
-            merged[from] = [baseFolder stringByAppendingPathComponent:(NSString *)to];
+            merged[from] = [scopeFolder stringByAppendingPathComponent:(NSString *)to];
         }
+    }
+}
+
+// Tweaks/.lc_shared_jbroot is rebuilt from scratch on every launch (rather than persisted
+// by DebImporter at import time) directly from `merged` -- which by this point already
+// holds every currently-known redirect resolved to its real absolute path -- so it always
+// reflects exactly what's importable right now, self-healing if a tweak was added, removed,
+// or moved since the last launch, without DebImporter needing to maintain it as accumulated
+// state. Every deb-imported tweak's own ".jbroot" symlink (see DebImporter.swift's
+// createJbrootSymlink) and the extra rpath LCPatchAddRPath adds both point at this fixed
+// location, so nothing needs to be re-patched when its contents change here.
+static void rebuildSharedJbroot(NSString *globalTweakFolder, NSDictionary<NSString *, NSString *> *merged) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *sharedRoot = [globalTweakFolder stringByAppendingPathComponent:@".lc_shared_jbroot"];
+    [fm removeItemAtPath:sharedRoot error:nil];
+    [fm createDirectoryAtPath:sharedRoot withIntermediateDirectories:YES attributes:nil error:nil];
+    for (NSString *from in merged) {
+        if (![from hasPrefix:@"/"] || [from hasPrefix:@"/var/jb/"]) continue;
+        NSString *symlinkPath = [sharedRoot stringByAppendingPathComponent:from];
+        NSString *symlinkDir = symlinkPath.stringByDeletingLastPathComponent;
+        [fm createDirectoryAtPath:symlinkDir withIntermediateDirectories:YES attributes:nil error:nil];
+        [fm createSymbolicLinkAtPath:symlinkPath withDestinationPath:merged[from] error:nil];
     }
 }
 
@@ -139,15 +169,17 @@ static NSURL *lc_debRewriteFileURL(NSURL *url) {
 
 @end
 
-void DebPathRedirectInit(NSString *globalTweakFolder, NSString *selectedTweakFolderPath) {
+void DebPathRedirectInit(NSString *globalTweakFolder, NSString *selectedTweakFolderPath, BOOL isGroupTweakFolder) {
     NSMutableDictionary<NSString *, NSString *> *merged = [NSMutableDictionary new];
     if (globalTweakFolder) {
-        loadRedirectsFromPlist([globalTweakFolder stringByAppendingPathComponent:@".lc_deb_redirects.plist"], globalTweakFolder, merged);
+        loadRedirectsFromDefaults(globalTweakFolder, @"", isGroupTweakFolder, merged);
     }
     if (selectedTweakFolderPath) {
-        loadRedirectsFromPlist([selectedTweakFolderPath stringByAppendingPathComponent:@".lc_deb_redirects.plist"], selectedTweakFolderPath, merged);
+        loadRedirectsFromDefaults(selectedTweakFolderPath, selectedTweakFolderPath.lastPathComponent, isGroupTweakFolder, merged);
     }
     if (merged.count == 0) return;
+
+    rebuildSharedJbroot(globalTweakFolder, merged);
 
     NSMutableArray<NSString *> *pathKeys = [NSMutableArray new];
     NSMutableArray<NSString *> *identifierKeys = [NSMutableArray new];

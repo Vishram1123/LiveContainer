@@ -39,7 +39,18 @@ struct LCAppSettingsView: View {
     @State private var selectUnusedContainerSheetShow = false
     
     @EnvironmentObject private var sharedModel : SharedModel
-    
+
+    // A deb-imported folder sitting at the top level of Tweaks/ already loads for every
+    // app (see TweakLoader.m's global-tweaks loop), so offering it here -- where picking
+    // one is supposed to scope a tweak to just this app -- would be misleading: selecting
+    // it wouldn't actually make it private to this app, since it's already active
+    // everywhere. Only plain, user-created folders are meaningful choices here.
+    private var selectableTweakFolderNames: [String] {
+        sharedModel.tweakFolderNames.filter { name in
+            !FileManager.default.fileExists(atPath: LCPath.tweakPath.appendingPathComponent(name).appendingPathComponent(DebImporter.debTweakMarkerName).path)
+        }
+    }
+
     init(model: LCAppModel) {
         self.appInfo = model.appInfo
         self._model = ObservedObject(wrappedValue: model)
@@ -67,7 +78,7 @@ struct LCAppSettingsView: View {
                     Menu {
                         Picker(selection: $model.uiTweakFolder , label: Text("")) {
                             Label("lc.common.none".loc, systemImage: "nosign").tag(Optional<String>(nil))
-                            ForEach(sharedModel.tweakFolderNames, id:\.self) { folderName in
+                            ForEach(selectableTweakFolderNames, id:\.self) { folderName in
                                 Text(folderName).tag(Optional(folderName))
                             }
                         }
