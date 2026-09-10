@@ -273,6 +273,9 @@ struct LCTweakFolderView : View {
             for i in indexSet {
                 let tweakItem = tweakItems[i]
                 try fm.removeItem(at: tweakItem.fileUrl)
+                if tweakItem.isDebImportedTweak {
+                    DebImporter.removeTweak(named: tweakItem.displayName, from: baseUrl)
+                }
                 indexToRemove.append(i)
             }
         } catch {
@@ -297,6 +300,9 @@ struct LCTweakFolderView : View {
         do {
 
             try fm.removeItem(at: tweakItem.fileUrl)
+            if tweakItem.isDebImportedTweak {
+                DebImporter.removeTweak(named: tweakItem.displayName, from: baseUrl)
+            }
             indexToRemove = tweakItems.firstIndex(where: { s in
                 return s == tweakItem
             })
@@ -408,7 +414,7 @@ struct LCTweakFolderView : View {
                         debWarnings.append(contentsOf: result.unsupportedScriptLines)
                         didImportDeb = true
                     } catch {
-                        throw "lc.tweakView.debImportError %@".localizeWithFormat(fileUrl.lastPathComponent)
+                        throw "lc.tweakView.debImportError %@".localizeWithFormat("\(fileUrl.lastPathComponent): \(error.localizedDescription)")
                     }
                     try? fm.removeItem(at: fileUrl)
                     continue

@@ -12,6 +12,8 @@ import Foundation
 enum DebImportError: LocalizedError {
     case notAnArchive
     case missingDataArchive
+    case corruptDataArchive
+    case nameCollision(String)
 
     var errorDescription: String? {
         switch self {
@@ -19,6 +21,10 @@ enum DebImportError: LocalizedError {
             return "Not a valid .deb (ar) archive"
         case .missingDataArchive:
             return "The .deb package has no data.tar payload"
+        case .corruptDataArchive:
+            return "The .deb package's data.tar payload could not be extracted"
+        case .nameCollision(let name):
+            return "A folder named \"\(name)\" already exists and wasn't created by importing a .deb"
         }
     }
 }
@@ -67,7 +73,9 @@ enum DebImporter {
         // libarchive transparently picks the right decompression filter.
         let dataDir = workDir.appendingPathComponent("data")
         try fm.createDirectory(at: dataDir, withIntermediateDirectories: true)
-        _ = extract(outerDir.appendingPathComponent(dataMember).path, dataDir.path, Progress())
+        guard extract(outerDir.appendingPathComponent(dataMember).path, dataDir.path, Progress()) == 0 else {
+            throw DebImportError.corruptDataArchive
+        }
 
         // Step 3: best-effort control.tar for pre/postinst. Missing or malformed
         // control metadata must not fail the import (required behavior #5).
@@ -95,7 +103,7 @@ enum DebImporter {
         }
         let resolvedTweakName = sanitizeFolderName(tweakName ?? debUrl.deletingPathExtension().lastPathComponent)
 
-        let installedNames = installPayload(from: dataDir, into: destinationFolder, tweakName: resolvedTweakName)
+        let installedNames = try installPayload(from: dataDir, into: destinationFolder, tweakName: resolvedTweakName)
 
         return DebImportResult(installedNames: installedNames, unsupportedScriptLines: unsupportedLines)
     }
@@ -112,7 +120,15 @@ enum DebImporter {
     }
 
     private static func sanitizeFolderName(_ raw: String) -> String {
-        let cleaned = raw.replacingOccurrences(of: "/", with: "-").trimmingCharacters(in: .whitespaces)
+        var cleaned = raw.replacingOccurrences(of: "/", with: "-").trimmingCharacters(in: .whitespaces)
+        // This comes straight from the .deb's own (untrusted) control file, and is about to
+        // be used as a single path component. Strip leading dots so it can never resolve to
+        // "." or ".." (a path-traversal escape out of the tweak folder via
+        // appendingPathComponent) and can never collide with our own dotfile bookkeeping
+        // (.lc_deb_redirects.plist, .lc_shared_jbroot, .lc_deb_tweak).
+        while cleaned.hasPrefix(".") {
+            cleaned.removeFirst()
+        }
         return cleaned.isEmpty ? "Tweak" : cleaned
     }
 
@@ -216,7 +232,7 @@ enum DebImporter {
     // tweak's binary references by *absolute* path (its own bundle, typically) needs a
     // redirect entry since that path no longer exists on disk -- see recordRedirects.
 
-    private static func installPayload(from dataRoot: URL, into destination: URL, tweakName: String) -> [String] {
+    private static func installPayload(from dataRoot: URL, into destination: URL, tweakName: String) throws -> [String] {
         let fm = FileManager.default
 
         // rootless packages nest everything under var/jb; unwrap that so the mirrored
@@ -229,14 +245,35 @@ enum DebImporter {
         }
 
         let tweakDir = destination.appendingPathComponent(tweakName)
-        try? fm.removeItem(at: tweakDir)
-        do {
-            try fm.copyItem(at: effectiveRoot, to: tweakDir)
-        } catch {
-            NSLog("[LC] deb import: failed to install payload for \(tweakName): \(error)")
-            return []
+        var existingIsDir: ObjCBool = false
+        if fm.fileExists(atPath: tweakDir.path, isDirectory: &existingIsDir) {
+            // Only replace something we recognize as our own previous import of this same
+            // tweak (marked with debTweakMarkerName) -- never a folder the user created
+            // themselves or one belonging to a different feature, which a same-named .deb
+            // would otherwise silently wipe out with no confirmation.
+            let looksLikeOurs = existingIsDir.boolValue && fm.fileExists(atPath: tweakDir.appendingPathComponent(debTweakMarkerName).path)
+            guard looksLikeOurs else {
+                throw DebImportError.nameCollision(tweakName)
+            }
+            try fm.removeItem(at: tweakDir)
         }
+        try fm.copyItem(at: effectiveRoot, to: tweakDir)
         fm.createFile(atPath: tweakDir.appendingPathComponent(debTweakMarkerName).path, contents: nil)
+
+        // Resolved once, the same way FileManager's enumerator below canonicalizes the URLs
+        // it yields (e.g. adding a /private prefix) -- everything under tweakDir is then
+        // related back to it by stripping this exact prefix, rather than searching for
+        // tweakName as a path *component*, which breaks if the payload happens to contain a
+        // directory with the same name as the tweak itself (e.g. a tweak named "Frameworks"
+        // shipping its own Library/Frameworks/Foo.framework -- searching by name would match
+        // the inner "Frameworks" instead of the tweak's own root).
+        let canonicalTweakDirPath = tweakDir.resolvingSymlinksInPath().path
+        func relativeComponents(under url: URL) -> [String]? {
+            let path = url.path
+            if path == canonicalTweakDirPath { return [] }
+            guard path.hasPrefix(canonicalTweakDirPath + "/") else { return nil }
+            return path.dropFirst(canonicalTweakDirPath.count + 1).split(separator: "/").map(String.init)
+        }
 
         // absolute path (as the tweak's own compiled-in strings would reference it) -> where
         // we actually put it, so the native path-redirect hook in TweakLoader can resolve it.
@@ -274,11 +311,10 @@ enum DebImporter {
         // real system library that was never shipped in any .deb (e.g. libroothide.dylib
         // itself) -- there's nothing on disk for the mirror to point at.
         func createJbrootSymlink(in directory: URL) {
-            let components = directory.pathComponents
-            guard let tweakNameIndex = components.lastIndex(of: tweakName) else { return }
+            guard let relative = relativeComponents(under: directory) else { return }
             // +1: one more hop than reaching tweakDir, to reach destination (where
             // .lc_shared_jbroot lives, alongside every tweak's own subfolder).
-            let upsToDestination = (components.count - (tweakNameIndex + 1)) + 1
+            let upsToDestination = relative.count + 1
             let upPath = Array(repeating: "..", count: upsToDestination).joined(separator: "/")
             let jbrootUrl = directory.appendingPathComponent(".jbroot")
             try? fm.removeItem(at: jbrootUrl)
@@ -287,18 +323,9 @@ enum DebImporter {
 
         var redirects: [String: String] = [:]
         func recordRedirect(for url: URL) {
-            // Locate our own tweakDir folder name in the path and take everything after it,
-            // rather than dropping tweakDir.pathComponents.count -- FileManager's enumerator
-            // resolves URLs to their canonical form (e.g. adding a /private prefix), which
-            // wouldn't match tweakDir's own component count if tweakDir was built from a
-            // non-canonical URL (this bit us: it silently left a stray "/tweakName" prefix
-            // baked into every redirect key, so nothing ever matched).
-            let components = url.pathComponents
-            guard let tweakNameIndex = components.lastIndex(of: tweakName) else { return }
-            let relativeComponents = Array(components.dropFirst(tweakNameIndex + 1))
-            guard !relativeComponents.isEmpty else { return }
-            let barePath = "/" + relativeComponents.joined(separator: "/")
-            let relativeToDestination = tweakName + "/" + relativeComponents.joined(separator: "/")
+            guard let relative = relativeComponents(under: url), !relative.isEmpty else { return }
+            let barePath = "/" + relative.joined(separator: "/")
+            let relativeToDestination = tweakName + "/" + relative.joined(separator: "/")
             redirects[barePath] = relativeToDestination
             redirects["/var/jb" + barePath] = relativeToDestination
             // also index by the bundle/framework's own CFBundleIdentifier, for tweaks that
@@ -334,6 +361,20 @@ enum DebImporter {
         recordRedirects(redirects, in: destination)
         rebuildSharedJbroot(in: destination)
         return [tweakName]
+    }
+
+    // Called when the user deletes a deb-imported tweak's folder (LCTweaksView.swift), so its
+    // entries in .lc_deb_redirects.plist and its mirrored files under .lc_shared_jbroot don't
+    // linger once the tweak itself is gone -- otherwise DebPathRedirect.m keeps rewriting live
+    // NSBundle/NSFileManager lookups to a path that no longer exists, and other tweaks'
+    // recursive loading keeps trying to dlopen now-dangling symlinks under .lc_shared_jbroot.
+    static func removeTweak(named tweakName: String, from destination: URL) {
+        let plistUrl = destination.appendingPathComponent(".lc_deb_redirects.plist")
+        guard let merged = NSDictionary(contentsOf: plistUrl) as? [String: String] else { return }
+        let prefix = tweakName + "/"
+        let pruned = merged.filter { !$0.value.hasPrefix(prefix) }
+        (pruned as NSDictionary).write(to: plistUrl, atomically: true)
+        rebuildSharedJbroot(in: destination)
     }
 
     // Rebuilds Tweaks/.lc_shared_jbroot (or the app-group equivalent) from scratch as a flat

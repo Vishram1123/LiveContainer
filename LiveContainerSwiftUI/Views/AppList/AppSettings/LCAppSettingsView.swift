@@ -46,8 +46,18 @@ struct LCAppSettingsView: View {
     // it wouldn't actually make it private to this app, since it's already active
     // everywhere. Only plain, user-created folders are meaningful choices here.
     private var selectableTweakFolderNames: [String] {
-        sharedModel.tweakFolderNames.filter { name in
-            !FileManager.default.fileExists(atPath: LCPath.tweakPath.appendingPathComponent(name).appendingPathComponent(DebImporter.debTweakMarkerName).path)
+        let fm = FileManager.default
+        return sharedModel.tweakFolderNames.filter { name in
+            // sharedModel.tweakFolderNames has the ".disabled" suffix already stripped off
+            // (LiveContainerSwiftUIApp.swift), but the folder on disk keeps it while
+            // disabled -- probe both so a disabled deb-imported folder doesn't slip past
+            // this filter just because the plain name doesn't exist right now.
+            for candidate in [name, name + LCTweakItem.disabledSuffix] {
+                if fm.fileExists(atPath: LCPath.tweakPath.appendingPathComponent(candidate).appendingPathComponent(DebImporter.debTweakMarkerName).path) {
+                    return false
+                }
+            }
+            return true
         }
     }
 

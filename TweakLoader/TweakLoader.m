@@ -36,7 +36,13 @@ static NSString *loadTweakAtURL(NSURL *url) {
 }
 
 static void loadTweaksRecursively(NSURL *folderURL, NSMutableArray *errors) {
-    NSArray<NSURL *> *items = [NSFileManager.defaultManager contentsOfDirectoryAtURL:folderURL includingPropertiesForKeys:@[NSURLIsDirectoryKey] options:0 error:nil];
+    // Skip dotfiles -- in particular ".jbroot", the symlink DebImporter.swift places next to
+    // every deb-imported dylib/framework pointing at Tweaks/.lc_shared_jbroot. Since
+    // NSURLIsDirectoryKey follows symlinks, a symlink-to-directory reports YES there, so
+    // without this we'd recurse into .lc_shared_jbroot itself and re-dlopen every mirrored
+    // framework from every other currently-imported tweak a second time through it (and
+    // surface a bogus "Failed to load tweaks" error for any mirror entry that's gone stale).
+    NSArray<NSURL *> *items = [NSFileManager.defaultManager contentsOfDirectoryAtURL:folderURL includingPropertiesForKeys:@[NSURLIsDirectoryKey] options:NSDirectoryEnumerationSkipsHiddenFiles error:nil];
     for (NSURL *fileURL in items) {
         NSString *name = fileURL.lastPathComponent;
         if ([name hasSuffix:@".disabled"]) {

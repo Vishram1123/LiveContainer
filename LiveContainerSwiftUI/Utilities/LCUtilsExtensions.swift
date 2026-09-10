@@ -61,7 +61,11 @@ extension LCUtils {
     }
 
     private static func collectFilesToSign(in folderUrl: URL, force: Bool, fm: FileManager) -> [URL] {
-        guard let fileURLs = try? fm.contentsOfDirectory(at: folderUrl, includingPropertiesForKeys: nil) else {
+        // .skipsHiddenFiles keeps this from walking into DebImporter's own bookkeeping
+        // (.lc_shared_jbroot in particular, a flat mirror of every deb-imported tweak's
+        // frameworks/bundles as symlinks -- every leaf there ends up filtered out below
+        // anyway, but not before the whole tree is walked and stat'd for nothing).
+        guard let fileURLs = try? fm.contentsOfDirectory(at: folderUrl, includingPropertiesForKeys: nil, options: .skipsHiddenFiles) else {
             return []
         }
         var result: [URL] = []
