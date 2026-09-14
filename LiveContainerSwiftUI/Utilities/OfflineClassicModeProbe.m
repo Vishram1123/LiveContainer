@@ -74,6 +74,7 @@ static BOOL LCSetScalarIvar(id object, const char *name, const void *value, size
 @end
 
 @interface SBApplicationInfo : NSObject
+- (instancetype)_initWithApplicationProxy:(id)proxy overrideURL:(NSURL*)overrideURL;
 - (instancetype)_initWithApplicationProxy:(id)proxy record:(id)record appIdentity:(id)identity processIdentity:(id)identity2 overrideURL:(NSURL*)overrideURL;
 @end
 
@@ -263,7 +264,12 @@ NSNumber *LCGetDefaultClassicMode(NSURL *appURL) {
                                      sdkVersion:LCVersionString(sdk)
                                      entitlements:@{}];
     
-    SBApplicationInfo* sbAppInfo = [[SBApplicationInfoClass alloc] _initWithApplicationProxy:proxy record:[LCFakeApplicationRecord new] appIdentity:[LCFakeApplicationIdentity new] processIdentity:[LCFakeProcessIdentity new] overrideURL:appURL ];
+    SBApplicationInfo* sbAppInfo;
+    if ([SBApplicationInfoClass instancesRespondToSelector:@selector(_initWithApplicationProxy:record:appIdentity:processIdentity:overrideURL:)]) {
+        sbAppInfo = [[SBApplicationInfoClass alloc] _initWithApplicationProxy:proxy record:[LCFakeApplicationRecord new] appIdentity:[LCFakeApplicationIdentity new] processIdentity:[LCFakeProcessIdentity new] overrideURL:appURL];
+    } else {
+        sbAppInfo = [[SBApplicationInfoClass alloc] _initWithApplicationProxy:proxy overrideURL:appURL];
+    }
     assert(sbAppInfo);
     SBApplication* sbApp = [[SBApplicationClass alloc] initWithApplicationInfo:sbAppInfo];
     assert(sbApp);

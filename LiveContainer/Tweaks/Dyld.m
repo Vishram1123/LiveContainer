@@ -665,6 +665,7 @@ void bypass_seg_count_check(void (^block)(void)) {
 }
 
 void bypass_os_variant_has_internal_content(void (^block)(void)) {
+#if !TARGET_OS_SIMULATOR
     const char *libsystem_darwinPath = "/usr/lib/system/libsystem_darwin.dylib";
     mach_header_u *libsystem_darwinHeader = LCGetLoadedImageHeader(0, libsystem_darwinPath);
     NSString *internalRelTypeName = @"_internal_release_type";
@@ -677,6 +678,7 @@ void bypass_os_variant_has_internal_content(void (^block)(void)) {
     
     uint32_t orig = *internalRelTypePtr;
     *internalRelTypePtr = 3;
+#endif
     
     // Bypass iOS 16's +[SpringBoardUI load] crash
     Class xctest = objc_allocateClassPair(NSObject.class, "XCTestConfiguration", 0);
@@ -685,7 +687,9 @@ void bypass_os_variant_has_internal_content(void (^block)(void)) {
     block();
     
     if (xctest) objc_disposeClassPair(xctest);
+#if !TARGET_OS_SIMULATOR
     *internalRelTypePtr = orig;
+#endif
 }
 
 kern_return_t catch_mach_exception_raise_state( mach_port_t exception_port, exception_type_t exception, const mach_exception_data_t code, mach_msg_type_number_t codeCnt, int *flavor, const thread_state_t old_state, mach_msg_type_number_t old_stateCnt, thread_state_t new_state, mach_msg_type_number_t *new_stateCnt) {
