@@ -181,9 +181,9 @@ final class ShareExtensionViewModel: ObservableObject {
 
         switch sortType {
         case "alphabetical":
-            sorted = regularApps.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+            sorted = regularApps.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
         case "reverse_alphabetical":
-            sorted = regularApps.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedDescending }
+            sorted = regularApps.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedDescending }
         case "last_launched":
             let dated = regularApps.compactMap { app -> (ShareApp, Date)? in
                 guard let lastLaunched = app.lastLaunched else {
@@ -218,7 +218,7 @@ final class ShareExtensionViewModel: ObservableObject {
     private func sortByCustomOrder(_ apps: [ShareApp]) -> [ShareApp] {
         guard let customSortOrder = sharedDefaults?.array(forKey: "LCCustomSortOrder") as? [String],
               !customSortOrder.isEmpty else {
-            return apps.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+            return apps.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
         }
 
         var sortedApps: [ShareApp] = []
@@ -229,7 +229,7 @@ final class ShareExtensionViewModel: ObservableObject {
             }
         }
 
-        remainingApps.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        remainingApps.sort { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
         sortedApps.append(contentsOf: remainingApps)
         return sortedApps
     }

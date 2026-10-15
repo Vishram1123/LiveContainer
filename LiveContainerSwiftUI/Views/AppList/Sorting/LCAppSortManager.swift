@@ -139,10 +139,10 @@ class LCAppSortManager: ObservableObject {
         case .defaultOrder:
             return appList
         case .alphabetical:
-            return appList.sorted { $0.appInfo.displayName() < $1.appInfo.displayName() }
+            return appList.sorted { $0.appInfo.displayName().localizedStandardCompare($1.appInfo.displayName()) == .orderedAscending }
             
         case .reverseAlphabetical:
-            return appList.sorted { $0.appInfo.displayName() > $1.appInfo.displayName() }
+            return appList.sorted { $0.appInfo.displayName().localizedStandardCompare($1.appInfo.displayName()) == .orderedDescending }
             
         case .lastLaunched:
             let appsWithLaunchDate = appList.compactMap { app -> (LCAppModel, Date)? in
@@ -178,7 +178,7 @@ class LCAppSortManager: ObservableObject {
     
     private func sortByCustomOrder(_ appList: [LCAppModel], customSortOrder: [String]) -> [LCAppModel] {
         if customSortOrder.isEmpty {
-            return appList.sorted { $0.appInfo.displayName() < $1.appInfo.displayName() }
+            return appList.sorted { $0.appInfo.displayName().localizedStandardCompare($1.appInfo.displayName()) == .orderedAscending }
         }
         
         var sortedApps: [LCAppModel] = []
@@ -190,7 +190,7 @@ class LCAppSortManager: ObservableObject {
             }
         }
         
-        remainingApps.sort { $0.appInfo.displayName() < $1.appInfo.displayName() }
+        remainingApps.sort { $0.appInfo.displayName().localizedStandardCompare($1.appInfo.displayName()) == .orderedAscending }
         sortedApps.append(contentsOf: remainingApps)
         
         return sortedApps

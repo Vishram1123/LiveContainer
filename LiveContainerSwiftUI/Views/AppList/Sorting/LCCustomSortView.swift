@@ -126,8 +126,8 @@ struct LCCustomSortView: View {
     }
     
     private func resetToAlphabetical() {
-        self.localApps.sort { $0.appInfo.displayName() < $1.appInfo.displayName() }
-        self.localHiddenApps.sort { $0.appInfo.displayName() < $1.appInfo.displayName() }
+        self.localApps.sort { $0.appInfo.displayName().localizedStandardCompare($1.appInfo.displayName()) == .orderedAscending }
+        self.localHiddenApps.sort { $0.appInfo.displayName().localizedStandardCompare($1.appInfo.displayName()) == .orderedAscending }
     }
     
     private func cancelChanges() {
